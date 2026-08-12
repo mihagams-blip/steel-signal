@@ -1,0 +1,1466 @@
+/* STEEL SIGNAL — HUD styling (military field-console).
+   Base tokens from the seed shell are kept stable; the component layer below
+   is owned by the HUD module (js/ui/hud.js builds this DOM). */
+
+:root {
+  --panel-bg: rgba(12, 16, 14, 0.78);
+  --panel-border: rgba(140, 160, 130, 0.25);
+  --panel-inset: inset 0 0 24px rgba(0, 0, 0, 0.35);
+  --accent: #E8A33D;
+  --friendly: #7ED88B;
+  --enemy: #E05A4E;
+  --info: #6BC7D6;
+  --text: #D8DCD0;
+  --text-dim: #8A9284;
+  --warn: #F2C94C;
+  --font-title: 'Allerta Stencil', sans-serif;
+  --font-head: 'Saira Condensed', sans-serif;
+  --font-body: 'Inter', sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #0a0c0a;
+  color: var(--text);
+  font-family: var(--font-body);
+  font-size: 14px;
+  -webkit-font-smoothing: antialiased;
+}
+
+#app {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+}
+#app canvas { display: block; }
+
+#hud-root {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none; /* panels re-enable */
+}
+#hud-root > * { pointer-events: auto; }
+#hud-root #ss-toasts,
+#hud-root #ss-worldlabels,
+#hud-root #ss-tooltip { pointer-events: none; }
+
+#fpv-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  pointer-events: none;
+}
+.hidden { display: none !important; }
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+/* ---- Shared panel chrome ---------------------------------------------- */
+
+.ss-panel {
+  position: absolute;
+  background: var(--panel-bg);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--panel-inset), 0 4px 18px rgba(0, 0, 0, 0.45);
+  color: var(--text);
+  /* one 45-degree clipped corner (top-right, ~14px) */
+  clip-path: polygon(0 0, calc(100% - 14px) 0, 100% 14px, 100% 100%, 0 100%);
+  overflow: hidden;
+}
+.ss-panel::after {
+  /* phosphor scanlines, ~3% */
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(180, 220, 180, 0.03) 0px,
+    rgba(180, 220, 180, 0.03) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+.ss-head {
+  font-family: var(--font-head);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.ss-mono { font-family: var(--font-mono); }
+
+.ss-btn {
+  font-family: var(--font-head);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 13px;
+  color: var(--text);
+  background: rgba(232, 163, 61, 0.10);
+  border: 1px solid rgba(232, 163, 61, 0.45);
+  padding: 6px 14px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+  clip-path: polygon(0 0, calc(100% - 8px) 0, 100% 8px, 100% 100%, 0 100%);
+}
+.ss-btn:hover { background: rgba(232, 163, 61, 0.28); color: #fff; }
+.ss-btn:active { background: rgba(232, 163, 61, 0.45); }
+.ss-btn:disabled {
+  /* same rule as .ss-act:disabled (CRITIQUE fix 25): readable, plainly inert */
+  opacity: 1;
+  cursor: default;
+  color: #6E6A60;
+  border-color: rgba(140, 160, 130, 0.22);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+/* ---- Top command bar --------------------------------------------------- */
+
+#ss-topbar {
+  top: 0;
+  left: 50%;
+  transform: translateX(-50%);
+  min-width: 560px;
+  display: flex;
+  align-items: center;
+  gap: 20px;
+  padding: 8px 22px 9px;
+  border-top: none;
+  clip-path: polygon(14px 100%, 0 calc(100% - 14px), 0 0, 100% 0, 100% calc(100% - 14px), calc(100% - 14px) 100%);
+}
+#ss-topbar .tb-brand {
+  font-family: var(--font-title);
+  font-size: 13px;
+  letter-spacing: 0.14em;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+#ss-topbar .tb-brand b { color: var(--accent); font-weight: 400; }
+#ss-topbar .sep { width: 1px; height: 18px; background: var(--panel-border); flex: none; }
+#ss-topbar .stat { display: flex; align-items: baseline; gap: 7px; white-space: nowrap; }
+#ss-topbar .stat .k {
+  color: var(--text-dim);
+  font-family: var(--font-head);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+#ss-topbar .stat .v { font-family: var(--font-mono); font-size: 13.5px; color: var(--text); }
+#ss-topbar .stat .v.friendly { color: var(--friendly); }
+#ss-topbar .stat .v.enemy { color: var(--enemy); }
+#ss-topbar .stat .v.accent { color: var(--accent); }
+#ss-obj { display: inline-flex; align-items: baseline; gap: 3px; }
+#ss-obj .obj-count {
+  font-family: var(--font-mono);
+  font-size: 13.5px;
+  color: var(--text);
+  margin-right: 5px;
+}
+#ss-obj .pip { color: var(--enemy); font-size: 10px; }
+#ss-obj .pip.primary { font-size: 13px; text-shadow: 0 0 7px rgba(224, 90, 78, 0.5); }
+#ss-obj .pip.held { color: var(--friendly); }
+#ss-obj .pip.primary.held { text-shadow: 0 0 7px rgba(126, 216, 139, 0.55); }
+
+/* ---- Toasts ------------------------------------------------------------ */
+
+#ss-toasts {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  z-index: 20;
+}
+.ss-toast {
+  font-family: var(--font-head);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 12.5px;
+  color: var(--text);
+  background: var(--panel-bg);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--panel-border);
+  border-left: 3px solid var(--accent);
+  padding: 6px 16px;
+  white-space: nowrap;
+  animation: ss-toast-in 0.25s ease;
+}
+.ss-toast.good { border-left-color: var(--friendly); color: var(--friendly); }
+.ss-toast.bad { border-left-color: var(--enemy); color: var(--enemy); }
+.ss-toast.warn { border-left-color: var(--warn); color: var(--warn); }
+.ss-toast.out {
+  opacity: 0;
+  transform: translateY(-6px);
+  transition: opacity 0.3s, transform 0.3s;
+}
+@keyframes ss-toast-in {
+  from { opacity: 0; transform: translateY(-8px); }
+}
+
+/* ---- Unit card --------------------------------------------------------- */
+
+#ss-unitcard {
+  left: 12px;
+  bottom: 12px;
+  width: 404px;
+  display: flex;
+  gap: 14px;
+  padding: 14px 16px 13px;
+  animation: ss-card-in 0.18s ease;
+}
+@keyframes ss-card-in {
+  from { opacity: 0; transform: translateY(6px); }
+}
+
+.uc-left {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  flex: none;
+}
+.uc-brackets {
+  position: relative;
+  width: 92px;
+  height: 62px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--friendly);
+  background:
+    radial-gradient(120% 130% at 50% 20%,
+      rgba(232, 163, 61, 0.10), rgba(232, 163, 61, 0) 68%),
+    repeating-linear-gradient(0deg,
+      rgba(0, 0, 0, 0.22) 0 1px, rgba(0, 0, 0, 0) 1px 3px);
+}
+#ss-unitcard.hostile .uc-brackets { color: var(--enemy); }
+
+/* CRITIQUE fix 26 — the portrait is a real per-type silhouette (TYPE_ART in
+   js/ui/hud.js), monoline, in the HUD amber. Affiliation moved to the APP-6
+   chip in the corner so the two reads do not fight for the same 90 px. */
+.ss-type-icon {
+  width: 78px;
+  height: auto;
+  display: block;
+  color: var(--accent);
+  filter: drop-shadow(0 0 7px rgba(232, 163, 61, 0.28))
+          drop-shadow(0 1px 2px rgba(0, 0, 0, 0.75));
+}
+/* Painted portrait (art/units/*.png). It fills the sensor frame edge to edge so
+   the plate reads as something seen THROUGH the bracket rather than a picture
+   pasted behind it. No amber tint — the affiliation chip carries the faction
+   read, per the note on TYPE_ART. The corner brackets and the chip are lifted
+   above it; without that the image would paint over them, since a real child
+   paints after the ::before pseudo at the same stacking level. */
+#uc-glyph:has(.ss-type-photo) {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  display: block;
+  overflow: hidden;
+}
+.ss-type-photo {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+  filter: saturate(0.92) contrast(1.04);
+}
+.uc-brackets:has(.ss-type-photo)::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+  pointer-events: none;
+  box-shadow: inset 0 0 20px rgba(0, 0, 0, 0.82);
+}
+.uc-brackets:has(.ss-type-photo)::before { z-index: 2; }
+.uc-brackets:has(.ss-type-photo) .uc-aff { z-index: 3; }
+.uc-aff {
+  position: absolute;
+  right: 3px;
+  bottom: 2px;
+  width: 15px;
+  height: 15px;
+  line-height: 0;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.75));
+}
+.ss-aff { width: 15px; height: 15px; display: block; }
+.uc-brackets::before {
+  /* sensor-frame corner brackets */
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  --bk: rgba(232, 163, 61, 0.65);
+  background:
+    linear-gradient(var(--bk), var(--bk)) 0 0 / 13px 2px,
+    linear-gradient(var(--bk), var(--bk)) 0 0 / 2px 13px,
+    linear-gradient(var(--bk), var(--bk)) 100% 0 / 13px 2px,
+    linear-gradient(var(--bk), var(--bk)) 100% 0 / 2px 13px,
+    linear-gradient(var(--bk), var(--bk)) 0 100% / 13px 2px,
+    linear-gradient(var(--bk), var(--bk)) 0 100% / 2px 13px,
+    linear-gradient(var(--bk), var(--bk)) 100% 100% / 13px 2px,
+    linear-gradient(var(--bk), var(--bk)) 100% 100% / 2px 13px;
+  background-repeat: no-repeat;
+}
+.ss-glyph {
+  width: 62px;
+  height: auto;
+  display: block;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.6));
+}
+.uc-vet {
+  color: var(--accent);
+  font-size: 12px;
+  letter-spacing: 3px;
+  min-height: 15px;
+  text-shadow: 0 0 6px rgba(232, 163, 61, 0.5);
+}
+
+.uc-main { flex: 1; min-width: 0; }
+.uc-name {
+  font-family: var(--font-head);
+  font-weight: 700;
+  font-size: 16px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.uc-sub {
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+  letter-spacing: 0.06em;
+  margin: 2px 0 8px;
+}
+.uc-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+}
+.uc-bar .k {
+  width: 36px;
+  flex: none;
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 10px;
+  color: var(--text-dim);
+  letter-spacing: 0.1em;
+}
+.pips { display: flex; gap: 3px; align-items: center; }
+.pips b {
+  width: 14px;
+  height: 6px;
+  background: rgba(140, 160, 130, 0.14);
+  border: 1px solid rgba(140, 160, 130, 0.25);
+}
+.pips b.on {
+  background: var(--friendly);
+  border-color: transparent;
+  box-shadow: 0 0 6px rgba(126, 216, 139, 0.35);
+}
+.pips.mid b.on {
+  background: var(--warn);
+  box-shadow: 0 0 6px rgba(242, 201, 76, 0.35);
+}
+.pips.low b.on {
+  background: var(--enemy);
+  box-shadow: 0 0 6px rgba(224, 90, 78, 0.4);
+}
+.pips.ammo b.on {
+  background: var(--info);
+  box-shadow: 0 0 6px rgba(107, 199, 214, 0.35);
+}
+.pips.ammo.low b.on { background: var(--enemy); }
+.pips .na {
+  color: var(--text-dim);
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.uc-stats {
+  display: flex;
+  gap: 16px;
+  margin-top: 10px;
+}
+.uc-stats .st { display: flex; flex-direction: column; }
+.uc-stats .k {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 9px;
+  color: var(--text-dim);
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+.uc-stats .v {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text);
+}
+
+.uc-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin-top: 9px;
+}
+.tag {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  padding: 2px 6px 1px;
+  border: 1px solid rgba(107, 199, 214, 0.4);
+  color: var(--info);
+}
+.tag.good { border-color: rgba(126, 216, 139, 0.5); color: var(--friendly); }
+.tag.bad { border-color: rgba(224, 90, 78, 0.6); color: var(--enemy); }
+.tag.warn { border-color: rgba(242, 201, 76, 0.55); color: var(--warn); }
+.tag.dim { border-color: var(--panel-border); color: var(--text-dim); }
+
+/* ---- Action bar (fire-control strip) ----------------------------------- */
+
+#ss-actionbar {
+  bottom: 12px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  padding: 8px 10px;
+}
+.ss-act {
+  font-family: var(--font-head);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  font-size: 12.5px;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--text);
+  background: rgba(140, 160, 130, 0.08);
+  border: 1px solid rgba(140, 160, 130, 0.3);
+  padding: 7px 12px;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, border-color 0.12s, box-shadow 0.12s;
+}
+.ss-act i {
+  font-style: normal;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--text-dim);
+  border: 1px solid rgba(140, 160, 130, 0.35);
+  border-radius: 2px;
+  padding: 2px 4px 1px;
+}
+.ss-act:hover:not(:disabled) {
+  background: rgba(140, 160, 130, 0.18);
+  color: #fff;
+}
+.ss-act.active {
+  background: rgba(232, 163, 61, 0.22);
+  border-color: var(--accent);
+  color: #fff;
+  box-shadow: inset 0 0 12px rgba(232, 163, 61, 0.25);
+}
+.ss-act.active i { color: var(--accent); border-color: var(--accent); }
+/* CRITIQUE fix 25 — a disabled order used to be a 32 %-opacity ghost on
+   near-black glass: FIRE MSN / FPV / LOITER were literally unreadable in C12,
+   so the player could not learn what the selected unit is capable of, only what
+   it can do this instant. The button now stays fully composited and drops to a
+   fixed, measured grey (#6E6A60 on the panel reads ~3.4:1 — legible, plainly
+   inert) with its hotkey chip border intact, so the fire-control strip always
+   answers "what does this unit have" as well as "what can it do now". */
+.ss-act:disabled {
+  opacity: 1;
+  cursor: default;
+  color: #6E6A60;
+  background: rgba(140, 160, 130, 0.035);
+  border-color: rgba(140, 160, 130, 0.16);
+}
+.ss-act:disabled i {
+  color: #57544C;
+  border-color: rgba(140, 160, 130, 0.26);
+  background: rgba(0, 0, 0, 0.22);
+}
+.ab-sep {
+  width: 1px;
+  background: var(--panel-border);
+  margin: 2px 6px;
+  flex: none;
+}
+
+/* ---- Comms log --------------------------------------------------------- */
+
+#ss-log {
+  right: 12px;
+  bottom: 12px;
+  width: 336px;
+  /* fixed height, not max-height: the minimap docks directly above it and the
+     stack must not shuffle as entries arrive */
+  height: 208px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+}
+#ss-log .ss-head {
+  margin-bottom: 6px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.log-live {
+  font-family: var(--font-mono);
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  color: var(--friendly);
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.log-live .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--friendly);
+  box-shadow: 0 0 6px rgba(126, 216, 139, 0.6);
+  animation: ss-pulse 1.6s ease-in-out infinite;
+}
+@keyframes ss-pulse { 50% { opacity: 0.25; } }
+
+#ss-log .entries {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  color: var(--text-dim);
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(140, 160, 130, 0.35) transparent;
+}
+#ss-log .entry { display: flex; gap: 7px; }
+#ss-log .entry .t { color: var(--accent); flex: none; }
+#ss-log .entry .m {
+  color: var(--text-dim);
+  word-break: break-word;
+  min-width: 0;
+}
+/* ROUND-3 FIX 12 — the repeat badge.
+   A barrage resolves once per shell, so four identical lines are four real
+   events; printing them four times is what made them read as a stuck renderer.
+   The badge keeps the count (information) and drops the repetition (noise). It
+   sits hard right on the flex row so the message column never reflows as the
+   number grows, and it is the only accent-coloured thing in the entry besides
+   the timestamp — the log stays a two-colour panel. */
+#ss-log .entry .rep {
+  flex: none;
+  margin-left: auto;
+  align-self: flex-start;
+  padding-left: 8px;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.04em;
+  text-shadow: 0 0 7px rgba(232, 163, 61, 0.35);
+}
+/* Each new repeat re-arms this (hud.js forces a reflow between the two class
+   writes), so the count is seen to move rather than silently ticking over. */
+#ss-log .entry .rep.hit { animation: ss-rep-hit 300ms ease-out; }
+@keyframes ss-rep-hit {
+  0% { color: #FFE7B0; text-shadow: 0 0 10px rgba(255, 231, 176, 0.85); }
+  100% { color: var(--accent); text-shadow: 0 0 7px rgba(232, 163, 61, 0.35); }
+}
+
+/* ---- Order of battle (left rail) --------------------------------------- */
+
+#ss-oob {
+  left: 12px;
+  top: 12px;
+  width: 250px;
+  max-height: calc(100vh - 212px);
+  padding: 9px 9px 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.oob-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+}
+.oob-head .ss-head { flex: 1; min-width: 0; }
+.oob-count {
+  font-family: var(--font-mono);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  flex: none;
+}
+.oob-toggle {
+  flex: none;
+  width: 19px;
+  height: 19px;
+  padding: 0;
+  background: rgba(140, 160, 130, 0.08);
+  border: 1px solid var(--panel-border);
+  color: var(--text-dim);
+  cursor: pointer;
+  position: relative;
+  transition: background 0.12s, color 0.12s, border-color 0.12s;
+}
+.oob-toggle::after {
+  content: '\25BE';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 10px;
+  line-height: 1;
+}
+#ss-oob.collapsed .oob-toggle::after { content: '\25B8'; }
+.oob-toggle:hover { background: rgba(232, 163, 61, 0.2); color: var(--accent); border-color: var(--accent); }
+
+.oob-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding-right: 2px;
+  scrollbar-width: thin;
+  scrollbar-color: rgba(140, 160, 130, 0.35) transparent;
+}
+#ss-oob.collapsed { width: 214px; }
+#ss-oob.collapsed .oob-list,
+#ss-oob.collapsed .oob-foot { display: none; }
+
+/* CRITIQUE fix 23 — the roster row is a real <button> now, so it has to be
+   stripped back to the flex slab it has always looked like: no UA border, no
+   UA background, no centred UA text, no inherited 13.33px Arial, and a full
+   -width box because a button shrink-wraps its content where a div did not.
+   Everything below this reset is the original row styling, unchanged. */
+.oob-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  width: 100%;
+  margin: 0;
+  font: inherit;
+  text-align: left;
+  border: 0;
+  border-radius: 0;
+  appearance: none;
+  -webkit-appearance: none;
+  padding: 4px 6px 4px 5px;
+  border-left: 2px solid transparent;
+  background: rgba(140, 160, 130, 0.05);
+  color: var(--friendly);
+  cursor: pointer;
+  transition: background 0.12s, opacity 0.12s, border-color 0.12s;
+}
+.oob-row:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+.oob-row:hover { background: rgba(140, 160, 130, 0.15); }
+.oob-row.sel {
+  background: rgba(232, 163, 61, 0.17);
+  border-left-color: var(--accent);
+}
+.oob-row.spent { opacity: 0.4; }
+/* CRITIQUE fix 23, third pass. A spent row is dimmed to 40 % so "what have I
+   not used this turn" reads at a glance — but `opacity` dims the whole box
+   including the focus outline, and a 40 %-alpha focus indicator on a
+   keyboard-reachable control is not a focus indicator. The resting state is
+   untouched; only the two interaction states pull the row back up. */
+.oob-row.spent:hover,
+.oob-row.spent:focus-visible { opacity: 0.85; }
+.oob-row.spent .oob-name { color: var(--text-dim); }
+.oob-row.hurt { border-left-color: var(--enemy); }
+.oob-row.sup { background: rgba(224, 90, 78, 0.10); }
+
+.oob-glyph { flex: none; width: 32px; display: flex; align-items: center; }
+.oob-glyph .ss-glyph { width: 32px; }
+
+.oob-main {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.oob-top { display: flex; align-items: baseline; gap: 5px; min-width: 0; }
+.oob-name {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 11.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.oob-vet {
+  flex: none;
+  color: var(--accent);
+  font-size: 8px;
+  letter-spacing: 1px;
+  text-shadow: 0 0 5px rgba(232, 163, 61, 0.55);
+}
+.oob-grid {
+  flex: none;
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  color: var(--text-dim);
+}
+.oob-hp {
+  height: 4px;
+  background: rgba(140, 160, 130, 0.16);
+  box-shadow: inset 0 0 0 1px rgba(140, 160, 130, 0.18);
+  overflow: hidden;
+}
+.oob-hp i {
+  display: block;
+  height: 100%;
+  width: 100%;
+  background: var(--friendly);
+  box-shadow: 0 0 6px rgba(126, 216, 139, 0.4);
+  transition: width 0.2s ease;
+}
+.oob-hp.mid i { background: var(--warn); box-shadow: 0 0 6px rgba(242, 201, 76, 0.4); }
+.oob-hp.low i { background: var(--enemy); box-shadow: 0 0 6px rgba(224, 90, 78, 0.45); }
+
+.oob-st { flex: none; display: flex; gap: 3px; }
+.oob-st b,
+.oob-foot .lg {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: 9px;
+  line-height: 1;
+  width: 14px;
+  height: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: rgba(138, 146, 132, 0.45);
+  border: 1px solid rgba(140, 160, 130, 0.2);
+  background: transparent;
+}
+.oob-st b.mv.on,
+.oob-foot .lg.mv {
+  color: var(--friendly);
+  border-color: rgba(126, 216, 139, 0.55);
+  background: rgba(126, 216, 139, 0.1);
+}
+.oob-st b.fr.on,
+.oob-foot .lg.fr {
+  color: var(--accent);
+  border-color: rgba(232, 163, 61, 0.55);
+  background: rgba(232, 163, 61, 0.1);
+}
+.oob-st b.fr.dry {
+  color: var(--enemy);
+  border-color: rgba(224, 90, 78, 0.45);
+}
+
+.oob-foot {
+  flex: none;
+  display: flex;
+  gap: 14px;
+  padding-top: 6px;
+  border-top: 1px solid var(--panel-border);
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+.oob-foot span { display: inline-flex; align-items: center; gap: 5px; }
+
+/* ---- Sector minimap ----------------------------------------------------- */
+
+#ss-minimap {
+  right: 12px;
+  bottom: 232px;               /* docked directly above the comms log */
+  width: 216px;
+  padding: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mm-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+.mm-scale {
+  font-family: var(--font-mono);
+  font-size: 9.5px;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.mm-body { position: relative; width: 200px; height: 200px; }
+#mm-canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #0e1210;
+  cursor: crosshair;
+  touch-action: none;
+}
+.mm-frame {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  --mk: rgba(232, 163, 61, 0.7);
+  box-shadow:
+    inset 0 0 0 1px rgba(140, 160, 130, 0.28),
+    inset 0 0 28px rgba(0, 0, 0, 0.5);
+  background:
+    linear-gradient(var(--mk), var(--mk)) 0 0 / 11px 1.5px,
+    linear-gradient(var(--mk), var(--mk)) 0 0 / 1.5px 11px,
+    linear-gradient(var(--mk), var(--mk)) 100% 0 / 11px 1.5px,
+    linear-gradient(var(--mk), var(--mk)) 100% 0 / 1.5px 11px,
+    linear-gradient(var(--mk), var(--mk)) 0 100% / 11px 1.5px,
+    linear-gradient(var(--mk), var(--mk)) 0 100% / 1.5px 11px,
+    linear-gradient(var(--mk), var(--mk)) 100% 100% / 11px 1.5px,
+    linear-gradient(var(--mk), var(--mk)) 100% 100% / 1.5px 11px;
+  background-repeat: no-repeat;
+}
+
+.mm-key {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 2px 10px;
+  font-family: var(--font-mono);
+  font-size: 8px;
+  letter-spacing: 0.09em;
+  color: var(--text-dim);
+}
+.mm-key span { display: inline-flex; align-items: center; gap: 4px; }
+.mm-key i { width: 6px; height: 6px; flex: none; }
+.mm-key i.k-own { background: var(--friendly); }
+.mm-key i.k-en { background: var(--enemy); transform: rotate(45deg); }
+.mm-key i.k-lk {
+  border: 1px solid var(--enemy);
+  opacity: 0.62;
+  transform: rotate(45deg);
+}
+
+/* ---- World labels (map-stamped place names) ---------------------------- */
+/* CRITIQUE fix 24. Projected from js/ui/hud.js each frame; the container's
+   opacity is the camera-distance gate (up above 90 units), each label's own
+   opacity is its on/off state after the de-clutter pass. First child of
+   #hud-root, so every panel stacks above it and the FPV blackout takes it
+   with the rest of the HUD. */
+
+#ss-worldlabels {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  opacity: 0;
+  contain: layout style;
+}
+.wl {
+  position: absolute;
+  top: 0;
+  left: 0;
+  text-align: center;
+  white-space: nowrap;
+  transition: opacity 170ms ease;
+  /* ROUND-3 FIX 16 — load-bearing, do not remove. hud.js writes
+     `translate3d(x,y,0) scale(s) translate(-50%,-100%)`; with the origin at the
+     element's own top-left the -50%/-100% step lands the block's bottom-centre
+     exactly on (0,0) BEFORE the scale is applied, so the anchor is
+     scale-invariant. With the default 50% 50% origin the banner would drift off
+     its own hex by h·(1−s)/2 every time the camera changed distance. */
+  transform-origin: 0 0;
+}
+.wl.off { opacity: 0; }
+.wl:not(.wl-river) {
+  padding: 2px 11px 3px;
+  background: radial-gradient(62% 130% at 50% 52%,
+    rgba(8, 10, 8, 0.58), rgba(8, 10, 8, 0) 74%);
+}
+/* stem down to the hex the name belongs to */
+.wl:not(.wl-river)::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 100%;
+  width: 1px;
+  height: 11px;
+  margin-left: -0.5px;
+  background: linear-gradient(180deg,
+    rgba(226, 220, 202, 0.6), rgba(226, 220, 202, 0));
+}
+.wl-name {
+  display: block;
+  font-family: var(--font-title);
+  font-size: 13px;
+  line-height: 1.05;
+  letter-spacing: 0.24em;
+  text-indent: 0.24em;          /* cancel the trailing letter-space */
+  color: #F4EDDA;
+  text-shadow:
+    0 0 2px rgba(6, 8, 6, 0.98),
+    0 1px 3px rgba(6, 8, 6, 0.92),
+    0 0 18px rgba(6, 8, 6, 0.66);
+}
+.wl-rule {
+  display: block;
+  height: 1px;
+  margin: 4px 0 3px;
+  background: linear-gradient(90deg,
+    rgba(224, 90, 78, 0) 0%, rgba(224, 90, 78, 0.85) 24%,
+    rgba(224, 90, 78, 0.85) 76%, rgba(224, 90, 78, 0) 100%);
+}
+.wl.held .wl-rule {
+  background: linear-gradient(90deg,
+    rgba(126, 216, 139, 0) 0%, rgba(126, 216, 139, 0.85) 24%,
+    rgba(126, 216, 139, 0.85) 76%, rgba(126, 216, 139, 0) 100%);
+}
+.wl-sub {
+  display: block;
+  font-family: var(--font-mono);
+  font-size: 8.5px;
+  line-height: 1;
+  letter-spacing: 0.2em;
+  text-indent: 0.2em;
+  color: rgba(222, 216, 200, 0.74);
+  text-shadow: 0 1px 3px rgba(6, 8, 6, 0.96);
+}
+.wl-pip {
+  display: inline-block;
+  width: 5px;
+  height: 5px;
+  margin-right: 6px;
+  vertical-align: 0.5px;
+  transform: rotate(45deg);
+  background: var(--enemy);
+  box-shadow: 0 0 7px rgba(224, 90, 78, 0.6);
+}
+.wl.held .wl-pip {
+  background: var(--friendly);
+  box-shadow: 0 0 7px rgba(126, 216, 139, 0.6);
+}
+/* ROUND-3 FIX 16 — TWO tiers, not three near-identical sizes.
+   The old scale was 17 / 12.5 / 12 px. A village and a bridge exit differing by
+   half a pixel is not a rank, it is a typo you can see: three settlement-class
+   names in one frame at three apparent sizes, which is exactly what the critic
+   measured. There are now two tiers and the step between them is 1.38× — an
+   unmistakable difference — while everything at OBJECTIVE rank shares one size
+   and is told apart by its sub-line instead. hud.js's depth curve is clamped to
+   a 1.23× span so it can never close this gap. */
+.wl-town .wl-name { font-size: 18px; letter-spacing: 0.32em; text-indent: 0.32em; }
+.wl-village .wl-name,
+.wl-bridge_exit .wl-name { font-size: 13px; }
+/* a hydronym, not an objective: no rule, no chip, cartographic tracking */
+.wl-river .wl-name {
+  font-family: var(--font-head);
+  font-weight: 500;
+  font-style: italic;
+  font-size: 12.5px;
+  letter-spacing: 0.44em;
+  text-indent: 0.44em;
+  color: rgba(196, 218, 214, 0.6);
+  text-shadow: 0 1px 4px rgba(6, 8, 6, 0.9);
+}
+
+/* ---- FPV feed: the HUD gets out of the way ----------------------------- */
+/* The dive is the money shot; nothing may sit on top of the video except the
+   drone's own telemetry. Driven by body.fpv-active (set by fx/dronecam.js and
+   mirrored by ui/hud.js from #fpv-overlay's visibility). */
+
+#hud-root > * { transition: opacity 180ms ease; }
+body.fpv-active #hud-root > * {
+  opacity: 0;
+  pointer-events: none;
+}
+body.fpv-active #ss-actionbar,
+body.fpv-active #ss-tooltip { display: none !important; }
+/* the label layer writes its own inline opacity every frame (the camera gate),
+   and an inline value outranks any selector — so the blackout has to shout */
+body.fpv-active #hud-root #ss-worldlabels { opacity: 0 !important; }
+
+/* The ARMED / CRUISE readout used to sit bottom-right, glyph-on-glyph over the
+   comms log. It now has a reserved slot on the centreline, directly above
+   "ESC — ABORT FEED". Specificity is deliberately higher than dronecam.js's own
+   injected <style>, which is appended to <head> after this sheet. */
+body #fpv-overlay .fpv-wrap .fpv-br {
+  left: 50%;
+  right: auto;
+  bottom: 46px;
+  transform: translateX(-50%);
+  text-align: center;
+  white-space: nowrap;
+  font-size: 12.5px;
+  letter-spacing: 0.26em;
+  padding: 5px 18px 4px;
+  border: 1px solid rgba(232, 234, 230, 0.34);
+  background: rgba(8, 10, 8, 0.42);
+  box-shadow: inset 0 0 18px rgba(0, 0, 0, 0.4);
+}
+body #fpv-overlay .fpv-wrap .fpv-br::before,
+body #fpv-overlay .fpv-wrap .fpv-br::after {
+  content: '';
+  position: absolute;
+  top: 50%;
+  width: 26px;
+  height: 1px;
+  background: rgba(232, 234, 230, 0.32);
+}
+body #fpv-overlay .fpv-wrap .fpv-br::before { right: 100%; margin-right: 9px; }
+body #fpv-overlay .fpv-wrap .fpv-br::after { left: 100%; margin-left: 9px; }
+body #fpv-overlay .fpv-wrap .fpv-br .fpv-mode {
+  color: #F2C94C;
+  text-shadow: 0 0 10px rgba(242, 201, 76, 0.45);
+}
+body #fpv-overlay .fpv-wrap .fpv-skip { bottom: 18px; }
+
+/* ---- FPV interference: scanned, not pixelated -------------------------- */
+/* The critic's read of the feed was "coarse block pixelation — real FPV
+   interference is fine-grained with horizontal tearing and rolling bands".
+   fx/dronecam.js owns the grain itself and already answered half of that: a
+   ~2 px xorshift tile with per-line DC drift and interlace, plus horizontal
+   tear bands re-rolled every 0.12 s. What is left is the part that is CSS's
+   job — the SCAN. A field of dots with no line structure reads as a mosaic
+   whatever its cell size; a 5.8 GHz analogue downlink reads as lines, because
+   that is how the picture is built.
+
+   Both layers hang off .fpv-vig rather than .fpv-wrap on purpose. The vignette
+   is the element immediately after the noise canvas, so its descendants paint
+   ABOVE the grain and BELOW the corners, crosshair, telemetry, SIGNAL LOST and
+   the impact flash — the white flash must still take the whole frame. They are
+   pseudo-elements on an element dronecam.js gives none, so nothing here can
+   collide with that module's own injected sheet.
+
+   Cost: the comb is one static paint and the band is a transform-only
+   animation on its own compositor layer, both only while #fpv-overlay is off
+   `display: none`, i.e. for the ~4 s of a dive. */
+
+body #fpv-overlay .fpv-wrap .fpv-vig { overflow: hidden; }
+
+/* The comb. A 3 px period against the noise's ~2 px cell, deliberately coprime
+   so the two never beat into a plaid: one dark scan line, one hairline
+   highlight directly under it (the line's own overshoot, which is what stops
+   the comb reading as a flat grey veil) and one clear. */
+body #fpv-overlay .fpv-wrap .fpv-vig::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    180deg,
+    rgba(4, 6, 5, 0.16) 0px,
+    rgba(4, 6, 5, 0.16) 1px,
+    rgba(226, 236, 232, 0.045) 1px,
+    rgba(226, 236, 232, 0.045) 2px,
+    rgba(0, 0, 0, 0) 2px,
+    rgba(0, 0, 0, 0) 3px
+  );
+}
+
+/* The roll. dronecam.js drifts one soft band across the noise buffer at ~20
+   buffer px/s — a 22 s period, which never completes inside a 4 s dive. This is
+   the one you actually see: a wide interference band sweeping the frame every
+   3.1 s, carrying its own compressed scan so the vertical hold reads as losing
+   lock rather than as a moving gradient. */
+body #fpv-overlay .fpv-wrap .fpv-vig::after {
+  content: '';
+  position: absolute;
+  left: -4%;
+  right: -4%;
+  top: 0;
+  height: 24%;
+  pointer-events: none;
+  background:
+    linear-gradient(180deg,
+      rgba(232, 240, 236, 0) 0%,
+      rgba(232, 240, 236, 0.05) 32%,
+      rgba(232, 240, 236, 0.075) 50%,
+      rgba(232, 240, 236, 0.04) 68%,
+      rgba(232, 240, 236, 0) 100%),
+    repeating-linear-gradient(180deg,
+      rgba(4, 6, 5, 0.13) 0px,
+      rgba(4, 6, 5, 0.13) 1px,
+      rgba(0, 0, 0, 0) 1px,
+      rgba(0, 0, 0, 0) 2px);
+  will-change: transform;
+  animation: ssFpvRoll 3.1s linear infinite;
+}
+@keyframes ssFpvRoll {
+  from { transform: translate3d(0, -40%, 0); }
+  to   { transform: translate3d(0, 430%, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+  body #fpv-overlay .fpv-wrap .fpv-vig::after {
+    animation: none;
+    transform: translate3d(0, 210%, 0);
+  }
+}
+
+/* ---- Hex tooltip ------------------------------------------------------- */
+
+#ss-tooltip {
+  position: fixed;
+  z-index: 30;
+  min-width: 190px;
+  max-width: 262px;
+  background: var(--panel-bg);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid var(--panel-border);
+  box-shadow: var(--panel-inset), 0 4px 14px rgba(0, 0, 0, 0.5);
+  clip-path: polygon(0 0, calc(100% - 10px) 0, 100% 10px, 100% 100%, 0 100%);
+  padding: 8px 11px 9px;
+}
+.tt-head {
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.07em;
+  color: var(--accent);
+  margin-bottom: 5px;
+  text-transform: uppercase;
+}
+.tt-row {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.tt-row b {
+  color: var(--text);
+  font-weight: 500;
+  margin-right: 12px;
+}
+.tt-row.infra { margin-top: 3px; }
+.tt-row.infra span { color: var(--warn); }
+.tt-row.infra b { color: var(--warn); margin-right: 0; margin-left: auto; }
+.tt-unit {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--panel-border);
+}
+.tt-unit .ss-glyph { width: 30px; flex: none; }
+.tt-unit.fr { color: var(--friendly); }
+.tt-unit.en { color: var(--enemy); }
+.tt-unit span {
+  color: var(--text);
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tt-unit b {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 11px;
+  color: var(--text-dim);
+  flex: none;
+}
+
+/* ---- Fullscreen overlays (briefing / after-action) ---------------------- */
+
+.ss-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(ellipse at 50% 130%, rgba(120, 82, 34, 0.25), transparent 60%),
+    rgba(6, 8, 6, 0.72);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+.ss-overlay .ss-panel { position: relative; }
+.ss-screen {
+  width: min(560px, 92vw);
+  max-height: 88vh;
+  overflow-y: auto;
+  padding: 34px 40px 30px;
+  animation: ss-card-in 0.25s ease;
+}
+
+.br-kicker {
+  font-family: var(--font-head);
+  font-weight: 500;
+  font-size: 11px;
+  letter-spacing: 0.28em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 12px;
+}
+.br-title {
+  font-family: var(--font-title);
+  font-weight: 400;
+  font-size: 36px;
+  line-height: 1.05;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text);
+  margin-bottom: 14px;
+  text-shadow: 0 0 22px rgba(232, 163, 61, 0.2);
+}
+.br-title.good { color: var(--friendly); text-shadow: 0 0 22px rgba(126, 216, 139, 0.3); }
+.br-title.bad { color: var(--enemy); text-shadow: 0 0 22px rgba(224, 90, 78, 0.3); }
+.br-body {
+  font-family: var(--font-body);
+  font-size: 13.5px;
+  line-height: 1.6;
+  color: var(--text-dim);
+  margin-bottom: 18px;
+}
+.br-objectives {
+  border-top: 1px solid var(--panel-border);
+  border-bottom: 1px solid var(--panel-border);
+  padding: 12px 0;
+  margin-bottom: 22px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.br-obj {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 13px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.br-obj .pip { color: var(--warn); font-size: 11px; }
+.br-obj .n { color: var(--text); }
+.br-obj .s {
+  margin-left: auto;
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--enemy);
+}
+.br-obj .s.held { color: var(--friendly); }
+.br-go {
+  width: 100%;
+  padding: 11px;
+  font-size: 14px;
+}
+.br-hint {
+  margin-top: 14px;
+  font-family: var(--font-mono);
+  font-size: 10px;
+  line-height: 1.7;
+  letter-spacing: 0.05em;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.go-stats {
+  display: flex;
+  gap: 30px;
+  margin: 8px 0 24px;
+}
+.go-stats > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 10px;
+  letter-spacing: 0.1em;
+  color: var(--text-dim);
+  text-transform: uppercase;
+}
+.go-stats span {
+  font-family: var(--font-mono);
+  font-size: 26px;
+  color: var(--text);
+}
+
+/* ---- Responsive -------------------------------------------------------- */
+
+@media (max-width: 1220px) {
+  #ss-unitcard { width: 348px; }
+  .uc-brackets { width: 80px; height: 56px; }
+  .ss-type-icon { width: 68px; }
+  #ss-log { width: 280px; }
+  #ss-topbar { min-width: 0; gap: 14px; }
+  #ss-topbar .tb-brand { display: none; }
+  #ss-oob { width: 228px; }
+}
+@media (max-width: 1080px) {
+  /* the centred command bar reaches the rail — drop the roster below it */
+  #ss-oob { top: 54px; max-height: calc(100vh - 254px); }
+}
+@media (max-width: 900px) {
+  #ss-log { height: 140px; width: 240px; }
+  .uc-stats { gap: 10px; }
+  #ss-oob { width: 206px; }
+  #ss-minimap { bottom: 164px; width: 176px; }
+  .mm-body { width: 160px; height: 160px; }
+  /* the 1.38 tier step is held at every breakpoint — see the note above */
+  .wl-town .wl-name { font-size: 15.5px; }
+  .wl-village .wl-name, .wl-bridge_exit .wl-name { font-size: 11.5px; }
+  .wl-sub { font-size: 8px; }
+}
+@media (max-height: 760px) {
+  #ss-log { height: 168px; }
+  #ss-minimap { bottom: 192px; width: 176px; }
+  .mm-body { width: 160px; height: 160px; }
+  #ss-oob { max-height: calc(100vh - 196px); }
+}
+@media (max-height: 620px) {
+  #ss-minimap { display: none; }
+}
+
+/* ---- Reduced motion ---------------------------------------------------- */
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* ---- Loading screen ---------------------------------------------------- */
+
+#loading {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background:
+    radial-gradient(ellipse at 50% 120%, rgba(120, 82, 34, 0.28), transparent 60%),
+    radial-gradient(ellipse at 50% -20%, rgba(46, 74, 122, 0.35), transparent 55%),
+    #0a0c0a;
+  opacity: 1;
+  transition: opacity 0.7s ease;
+}
+#loading.fade { opacity: 0; pointer-events: none; }
+
+#loading .loading-scan {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background: repeating-linear-gradient(
+    to bottom,
+    rgba(180, 220, 180, 0.03) 0px,
+    rgba(180, 220, 180, 0.03) 1px,
+    transparent 1px,
+    transparent 3px
+  );
+}
+
+.loading-inner { text-align: center; max-width: 560px; padding: 0 24px; }
+
+.loading-kicker {
+  font-family: var(--font-head);
+  font-weight: 500;
+  font-size: 12px;
+  letter-spacing: 0.32em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  margin-bottom: 14px;
+}
+
+.loading-title {
+  font-family: var(--font-title);
+  font-weight: 400;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  font-size: 58px;
+  line-height: 1;
+  color: var(--text);
+  text-shadow: 0 0 24px rgba(232, 163, 61, 0.25);
+}
+.loading-title::after {
+  content: '';
+  display: block;
+  width: 180px;
+  height: 2px;
+  margin: 18px auto 0;
+  background: linear-gradient(90deg, transparent, var(--accent), transparent);
+}
+
+.loading-sub {
+  margin-top: 14px;
+  font-family: var(--font-head);
+  font-weight: 600;
+  font-size: 15px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--accent);
+}
+
+.loading-bar {
+  margin: 30px auto 0;
+  width: 320px;
+  height: 3px;
+  background: rgba(140, 160, 130, 0.18);
+  overflow: hidden;
+}
+.loading-fill {
+  width: 0%;
+  height: 100%;
+  background: var(--accent);
+  box-shadow: 0 0 8px rgba(232, 163, 61, 0.8);
+  transition: width 0.25s ease;
+}
+
+.loading-status {
+  margin-top: 12px;
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  min-height: 16px;
+}
+.loading-status.error { color: var(--enemy); }
