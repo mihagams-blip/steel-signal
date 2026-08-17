@@ -684,6 +684,11 @@ const GLYPH = {
   fpv_drone: 'drone_strike',
   recon_drone: 'recon',
   loiter_munition: 'drone_loiter',
+  // AUDIO/AIR ROUND — must stay identical to the GLYPH table in ui/hud.js.
+  // `sam` would otherwise fall back to its `type.icon` ('aa') and draw the
+  // SHORAD's counter symbol; `helo` would fall back to a plain drone chevron.
+  helo: 'helo',
+  sam: 'aa_long',
 };
 
 function glyphKey(unit) {
@@ -782,6 +787,30 @@ function drawGlyph(g, key, cx, cy, hw, hh, colour, width) {
       g.beginPath();
       g.moveTo(cx - hw, cy + hh);
       g.quadraticCurveTo(cx, cy - hh * 2.1, cx + hw, cy + hh);
+      g.stroke();
+      break;
+    case 'aa_long':                                    // arc + range bar
+      g.beginPath();                                   // = AREA air defence
+      g.moveTo(cx - hw, cy + hh);
+      g.quadraticCurveTo(cx, cy - hh * 2.1, cx + hw, cy + hh);
+      g.stroke();
+      g.lineWidth = w * 0.85;                          // a count, not a shape:
+      g.beginPath();                                   // one arc = SHORAD,
+      g.moveTo(cx - hw * 0.72, cy + hh * 0.92);        // arc + bar = SAM
+      g.lineTo(cx + hw * 0.72, cy + hh * 0.92);
+      g.stroke();
+      break;
+    case 'helo':                                       // rotor bar over hull
+      g.beginPath();
+      g.moveTo(cx - hw, cy - hh * 0.72);
+      g.lineTo(cx + hw, cy - hh * 0.72);
+      g.stroke();
+      g.beginPath();
+      g.ellipse(cx, cy + hh * 0.30, hw * 0.62, hh * 0.52, 0, 0, Math.PI * 2);
+      g.stroke();
+      g.lineWidth = w * 0.85;                          // mast
+      g.beginPath();
+      g.moveTo(cx, cy - hh * 0.72); g.lineTo(cx, cy - hh * 0.18);
       g.stroke();
       break;
     case 'ew':                                         // zigzag

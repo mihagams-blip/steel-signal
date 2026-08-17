@@ -1,7 +1,12 @@
 // STEEL SIGNAL — game/combat.js
 // Full combat resolution per GAMEPLAY.md §3–§5 (constants copied from §9).
 // Contract exports: resolveAttack, fpvStrike, loiterStrike, artilleryBarrage.
-// Extra exports (documented in INTEGRATION_NOTES.md): previewAttack, effectiveMove.
+// Extra exports (documented in INTEGRATION_NOTES.md): previewAttack,
+// effectiveMove, targetCategory, and — new this round, for the air layer —
+// isAirUnit, canEngageAir, airDefenceCovering. Every other module that needs
+// to know "does it fly / can it shoot at things that fly / is this hex under a
+// missile ring" MUST call these instead of testing typeIds, or the roster ends
+// up defined in five places again (see the AIR DOMAIN block below).
 //
 // This module is AUTHORITATIVE for combat state mutation: it spends ammo, applies
 // damage/suppression/veterancy, kills units (wreck via features.setWreck) and emits
@@ -103,14 +108,54 @@ const BARRAGE_TOP_MULT_VEHICLE = 1.1; // plunging fire onto deck armour
 const BARRAGE_TOP_MULT_FOOT = 1.0;    // airburst — infantry math stays §3.1-close
 
 // Target categories by typeId (GAMEPLAY.md §1.1)
-const HARD_IDS = new Set(['mbt', 'ifv', 'apc', 'spg', 'mlrs', 'aa']);
+const HARD_IDS = new Set(['mbt', 'ifv', 'apc', 'spg', 'mlrs', 'aa', 'sam']);
 const FOOT_IDS = new Set(['infantry', 'atgm_team']);       // benefit from crop cover
-const VEHICLE_IDS = new Set(['mbt', 'ifv', 'apc', 'spg', 'mlrs', 'aa', 'ew', 'truck']);
+const VEHICLE_IDS = new Set(['mbt', 'ifv', 'apc', 'spg', 'mlrs', 'aa', 'sam', 'ew', 'truck']);
 // Who takes the ×VEHICLE top-attack multiplier: everything with a hull or a
 // chassis. VEHICLE_IDS plus the truck-mounted loitering-munition launcher
 // (GAMEPLAY.md §1 note). The remainder — infantry, atgm_team, fpv_drone (a
 // dismounted operator team) — takes the ×FOOT multiplier.
 const TOP_ATTACK_VEHICLE_IDS = new Set([...VEHICLE_IDS, 'loiter_munition']);
+// Who drinks the fuel depot (§5: RED vehicles move −2 for 3 turns). Aviation
+// burns from the same dump — killing the depot GROUNDS RED's gunship for those
+// three turns, which is a real extra payoff for spending a loitering round on
+// it. Kept separate from VEHICLE_IDS so the top-attack set above stays a
+// statement about armour, not about fuel.
+const FUEL_USER_IDS = new Set([...VEHICLE_IDS, 'helo']);
+
+// ---------------------------------------------------------------------------
+// AIR DOMAIN — GAMEPLAY.md §4.3 (player-feedback round: attack helicopter +
+// layered air defence).
+//
+// The old build hard-coded the whole air layer as `typeId === 'recon_drone'`
+// (the only air TARGET) and `typeId === 'aa'` (the only air SHOOTER) in six
+// places. Two new unit types break that immediately, so every air rule below
+// reads a CAPABILITY, never an id:
+//
+//   isAirUnit(u)     — u flies. It is an air TARGET (only air defence may
+//                      engage it), it takes NO terrain cover, it ignores the
+//                      river-crossing malus, artillery and drones cannot touch
+//                      it, and when it ATTACKS it attacks from above (cover
+//                      halved, like indirect fire).
+//                      Trait: 'air' (or 'flying'), class 'air', or the id
+//                      fallback set below.
+//   canEngageAir(u)  — u is air defence: it may put its `attack.air` column on
+//                      an air target, and it auto-engages enemy air that ends
+//                      a move inside its envelope (= its own `range`).
+//                      Trait: 'airdef' (or 'intercept'), class 'aa', or the
+//                      id fallback set below.
+//   isPointDefence(u)— SHORAD class. The ONLY thing that swats an inbound FPV
+//                      or loitering round out of the sky (§4.3 interception),
+//                      and the only air defence with no per-phase engagement
+//                      limit — it is a reactive gun/missile mount, not a radar
+//                      battery that has to acquire and cue.
+//                      Trait: 'intercept'.
+//
+// The id sets are a SAFETY NET only: units.js is authored by another owner and
+// this module must not break if a trait name lands late. Traits win.
+const AIR_UNIT_IDS = new Set(['recon_drone', 'helo']);
+const AIR_DEFENCE_IDS = new Set(['aa', 'sam']);
+const AD_MIN_ENVELOPE = 1;
 
 // ---------------------------------------------------------------------------
 // Deps / RNG plumbing (lazy — never touch Game at module-eval time: state.js
@@ -174,8 +219,41 @@ function hasTrait(u, t) {
   return !!(u && u.type && Array.isArray(u.type.traits) && u.type.traits.includes(t));
 }
 
+/**
+ * Does this unit fly? (extra export — state.js/hud.js/markers.js should call
+ * this instead of re-deriving `typeId === 'recon_drone'`, so the air roster
+ * stays defined in ONE place.)
+ */
+export function isAirUnit(u) {
+  if (!u) return false;
+  if (hasTrait(u, 'air') || hasTrait(u, 'flying')) return true;
+  const cls = u.type && u.type.class;
+  if (cls === 'air' || cls === 'helo' || cls === 'aviation') return true;
+  return AIR_UNIT_IDS.has(u.typeId);
+}
+
+/** May this unit put fire on an AIR target at all? (extra export.) */
+export function canEngageAir(u) {
+  if (!u) return false;
+  if (hasTrait(u, 'airdef') || hasTrait(u, 'intercept') || hasTrait(u, 'sam')) {
+    return true;
+  }
+  if (u.type && u.type.class === 'aa') return true;
+  return AIR_DEFENCE_IDS.has(u.typeId);
+}
+
+/** SHORAD class: swats inbound airframes, fires without a per-phase limit. */
+function isPointDefence(u) {
+  return !!u && (hasTrait(u, 'intercept') || u.typeId === 'aa');
+}
+
+/** How far an air-defence unit reaches to auto-engage: its own weapon range. */
+function airEnvelope(u) {
+  return Math.max(AD_MIN_ENVELOPE, (u && u.type && u.type.range) || 0);
+}
+
 export function targetCategory(unit) {
-  if (unit.typeId === 'recon_drone') return 'air';
+  if (isAirUnit(unit)) return 'air';
   return HARD_IDS.has(unit.typeId) ? 'hard' : 'soft';
 }
 
@@ -214,6 +292,7 @@ function hasCombinedArms(attacker, defender) {
 // hex — i.e. some water tile is adjacent to both attacker and defender — takes
 // ATK −3. Fighting from/onto a bridge hex is the sanctioned route (no penalty).
 function riverCrossing(attacker, defender) {
+  if (isAirUnit(attacker)) return false;   // an aircraft does not ford anything
   const dist = hexDistance(attacker.hex, defender.hex);
   if (dist < 1 || dist > 2) return false;
   const aTile = tileAt(attacker.hex);
@@ -226,11 +305,55 @@ function riverCrossing(attacker, defender) {
 }
 
 // Nearest enemy SHORAD able to intercept a strike on `target` (§4.3).
+// POINT DEFENCE ONLY, and always at the fixed AA_UMBRELLA radius: a long-range
+// SAM battery does not swat quadcopters — its missiles are built for aircraft,
+// and letting a 6-hex battery blanket the map with 40 % FPV intercepts would
+// delete the drone war the scenario is about. That split is what keeps SHORAD
+// worth buying once the SAM exists.
 function interceptingAA(targetHex, strikerFaction) {
   return Game.units.find((u) =>
-    u.alive && u.faction !== strikerFaction && u.typeId === 'aa' &&
+    u.alive && u.faction !== strikerFaction && isPointDefence(u) &&
     !u.suppressed && u.ammo > 0 &&
     hexDistance(u.hex, targetHex) <= AA_UMBRELLA) || null;
+}
+
+// --- Air-defence engagement (§4.3) -----------------------------------------
+// Which enemy battery would engage an air unit of `faction` standing on `hex`.
+// `ledger` true = respect the once-per-phase limit on deliberate batteries
+// (the live rule); false = the planner's view, which assumes a loaded battery.
+const autoEngagedThisPhase = new Set();   // air-defence unit ids
+
+function findAirDefence(hex, faction, ledger) {
+  let best = null;
+  let bestScore = -Infinity;
+  for (const u of Game.units) {
+    if (!u.alive || u.faction === faction) continue;
+    if (!canEngageAir(u)) continue;
+    if (u.suppressed) continue;                       // §3.1 — suppress it first
+    if (u.type && u.type.ammo > 0 && u.ammo <= 0) continue;
+    const air = (u.type && u.type.attack && u.type.attack.air) || 0;
+    if (air <= 0) continue;
+    const d = hexDistance(u.hex, hex);
+    if (d < 1 || d > airEnvelope(u)) continue;
+    if (ledger && !isPointDefence(u) && autoEngagedThisPhase.has(u.id)) continue;
+    // Deadliest battery first, nearest as the tie-break — the SAM takes the
+    // shot when both rings overlap, which is the engagement the player should
+    // be made to feel.
+    const s = air * 10 - d;
+    if (s > bestScore) { bestScore = s; best = u; }
+  }
+  return best;
+}
+
+/**
+ * Extra export for ai.js / hud.js: the enemy air-defence unit that covers this
+ * hex against `faction`'s aircraft, or null. This is the "do not fly there"
+ * oracle — the AI scores its gunship's flight path with it, and it is the same
+ * predicate the live auto-engagement uses.
+ */
+export function airDefenceCovering(hex, faction) {
+  if (!hex) return null;
+  return findAirDefence(hex, faction, false);
 }
 
 // Enemy jammer covering a hex (§4.2). "Enemy" = enemy of the acting drone.
@@ -265,7 +388,11 @@ function strikeDamage(attacker, defender, opts) {
   const mode = opts.mode || 'direct';
   const indirectLike =
     mode === 'barrage' || mode === 'loiter' || hasTrait(attacker, 'indirect');
-  const topAttack = indirectLike || mode === 'fpv';
+  // An AIRBORNE attacker is a top attack too: a gunship shoots down into the
+  // hex. It gets the §3.1 halved-cover treatment (a treeline is thinner from
+  // above) but NOT the drone damage bases — its punch comes from its own
+  // attack column, so the units agent's numbers stay the single dial.
+  const topAttack = indirectLike || mode === 'fpv' || isAirUnit(attacker);
 
   const cat = targetCategory(defender);
   const atkCol = (attacker.type && attacker.type.attack &&
@@ -278,12 +405,19 @@ function strikeDamage(attacker, defender, opts) {
     (opts.river ? RIVER_ATK : 0) +
     (opts.spotted ? SPOTTED_ARTY_BONUS : 0);
 
+  // An aircraft takes NO terrain cover: it is not in the forest, it is over it.
+  // (It cannot entrench either — nothing to dig.) That is the whole reason air
+  // defence has to exist: everything else on the map can hide, an airframe
+  // cannot, so its only protection is that almost nothing may shoot at it.
   const tile = tileAt(defender.hex);
-  let cover = (tile ? tile.cover || 0 : 0) +
-    (hillAt(defender.hex) ? 1 : 0) +
-    (defender.entrench || 0) +
-    (tile && tile.type === 'field' && FOOT_IDS.has(defender.typeId) ? 1 : 0);
-  if (topAttack) cover = Math.floor(cover / 2);
+  let cover = 0;
+  if (!isAirUnit(defender)) {
+    cover = (tile ? tile.cover || 0 : 0) +
+      (hillAt(defender.hex) ? 1 : 0) +
+      (defender.entrench || 0) +
+      (tile && tile.type === 'field' && FOOT_IDS.has(defender.typeId) ? 1 : 0);
+    if (topAttack) cover = Math.floor(cover / 2);
+  }
 
   const DEF = ((defender.type && defender.type.defense) || 0) + cover +
     (defender.veterancy || 0) -
@@ -531,21 +665,45 @@ function damageInfra(obj, dmg, report) {
 // ---------------------------------------------------------------------------
 let _init = false;
 
+// §4.3 — ANY enemy air unit (recon UAV, gunship) that ends its move inside an
+// air-defence engagement envelope is engaged for free, before it can act. This
+// is the rule that makes an air-defence ring mean something on the map:
+//
+//   • SHORAD (point defence, envelope = its range 2) fires EVERY time. It never
+//     runs out of engagements, only ammunition.
+//   • A SAM battery (envelope = its long range) gets ONE engagement per enemy
+//     phase — a radar battery acquires, cues and launches. So a cheap airframe
+//     sent through first BAITS the launcher and the second aircraft crosses the
+//     ring unengaged. That bait is a real, discoverable tactic, for both sides.
+//   • A SUPPRESSED battery does not fire at all (§3.1). Prep the ring with
+//     artillery and the sky opens — the combined-arms answer to air defence.
 function onUnitMoved(arg) {
-  // Auto-engage: enemy recon_drone ending a move inside an AA umbrella (§4.3).
   const u = arg && arg.typeId ? arg : (arg && arg.unit ? arg.unit : null);
-  if (!u || !u.alive || u.typeId !== 'recon_drone') return;
-  const aa = interceptingAA(u.hex, u.faction);
-  if (!aa) return;
-  aa.ammo = Math.max(0, aa.ammo - 1); // free action, costs 1 ammo, no fired flag
+  if (!u || !u.alive || !isAirUnit(u)) return;
+  const ad = findAirDefence(u.hex, u.faction, true);
+  if (!ad) return;
+  if (!isPointDefence(ad)) autoEngagedThisPhase.add(ad.id);
+  // Free action: costs 1 ammo, never sets `fired` — the battery can still take
+  // its own deliberate shot on its own turn.
+  if (!ad.type || ad.type.ammo > 0) ad.ammo = Math.max(0, ad.ammo - 1);
   const R = getRng(null);
-  const { dmg } = strikeDamage(aa, u, { mode: 'direct', rngFn: R });
-  const report = blankReport('aa_auto', aa, u);
+  const { dmg } = strikeDamage(ad, u, { mode: 'direct', rngFn: R });
+  const report = blankReport('aa_auto', ad, u);
+  report.airDefence = true;
   report.dmgToDefender = dmg;
-  const killed = applyDamage(u, dmg, aa);
-  report.killed = killed ? u : null;
-  report.events.push(`SHORAD auto-engagement: ${dmg} dmg`);
-  log(`${label(aa)} auto-engages ${label(u)} — ${dmg} dmg.`);
+  // A gunship that survives the engagement is rattled (−2 ATK on its run). An
+  // unarmed spotter has nothing to suppress, so the recon-UAV path is byte-for-
+  // byte the behaviour that shipped.
+  if (((u.type && u.type.range) || 0) >= 1) {
+    report.suppressed = applySuppression(u, dmg, SUPPRESS_AT);
+  }
+  const killed = applyDamage(u, dmg, ad);
+  if (killed) { report.killed = u; report.suppressed = false; }
+  const arm = (ad.type && ad.type.name) || 'Air defence';
+  report.events.push(`${arm} auto-engagement: ${dmg} dmg`);
+  log(isPointDefence(ad)
+    ? `${label(ad)} auto-engages ${label(u)} — ${dmg} dmg.`
+    : `${label(ad)} locks on and launches at ${label(u)} — ${dmg} dmg.`);
   flushLog();
   Game.emit('unitAttacked', report);
 }
@@ -557,6 +715,9 @@ function ensureInit() {
   Game.on('infraDestroyed', onInfraDestroyed);
   Game.on('unitMoved', (arg) => { try { onUnitMoved(arg); } catch (_) {} });
   Game.on('turnStarted', (info) => {
+    // Every air-defence battery gets its engagement credit back at the start of
+    // each phase, so "one launch per enemy phase" means exactly that.
+    autoEngagedThisPhase.clear();
     // Suppression clears at the start of the suppressed side's own turn.
     const side = info && info.side;
     if (!side) return;
@@ -583,7 +744,7 @@ export function effectiveMove(unit) {
   let m = (unit.type && unit.type.move) || 0;
   const fx = infraFx();
   if (fx.fuelDepotTurns > 0 && unit.faction === 'red' &&
-      VEHICLE_IDS.has(unit.typeId)) {
+      FUEL_USER_IDS.has(unit.typeId)) {
     m = Math.max(1, m - 2);
   }
   return m;
@@ -607,8 +768,8 @@ export function resolveAttack(attacker, defender, ctx = {}) {
   if (hasTrait(attacker, 'indirect')) return artilleryBarrage(attacker, defender.hex, ctx);
 
   const cat = targetCategory(defender);
-  if (cat === 'air' && attacker.typeId !== 'aa') {
-    return fail('only SHORAD can engage aerial targets');
+  if (cat === 'air' && !canEngageAir(attacker)) {
+    return fail('only air-defence units can engage aerial targets');
   }
   const atkCol = (attacker.type.attack && attacker.type.attack[cat]) || 0;
   if (atkCol <= 0) return fail('no effective weapon vs target');
@@ -671,7 +832,9 @@ function canReturnFire(defender, attacker, dist) {
   const range = defender.type.range || 0;
   if (range < 1 || dist > range) return false;
   const cat = targetCategory(attacker);
-  if (cat === 'air' && defender.typeId !== 'aa') return false;
+  // Nothing shoots back at an aircraft except air defence — a rifle section
+  // does not "return fire" at a gunship hovering at range 2.
+  if (cat === 'air' && !canEngageAir(defender)) return false;
   if (((defender.type.attack && defender.type.attack[cat]) || 0) <= 0) return false;
   if (defender.type.ammo > 0 && defender.ammo <= 0) return false;
   return true;
@@ -688,7 +851,9 @@ export function fpvStrike(unit, targetUnit, ctx = {}) {
   if (!unit || !unit.alive) return fail('operator team unavailable');
   if (!targetUnit || !targetUnit.alive) return fail('target already destroyed');
   if (targetUnit.faction === unit.faction) return fail('friendly target');
-  if (targetUnit.typeId === 'recon_drone') return fail('cannot engage aerial target');
+  // An FPV quadcopter cannot chase an aircraft — not the UAV, and NOT the
+  // gunship. Air is killed by air defence, full stop (§4.3).
+  if (isAirUnit(targetUnit)) return fail('cannot engage aerial target');
   if (unit.ammo <= 0) return fail('no airframes remaining');
   const range = unit.type.range || 4;
   const dist = hexDistance(unit.hex, targetUnit.hex);
@@ -775,7 +940,7 @@ export function loiterStrike(unit, target, ctx = {}) {
   if (isInfra && !target.alive) return fail('structure already destroyed');
   if (!isInfra && !target.alive) return fail('target already destroyed');
   if (!isInfra && target.faction === unit.faction) return fail('friendly target');
-  if (!isInfra && target.typeId === 'recon_drone') return fail('cannot engage aerial target');
+  if (!isInfra && isAirUnit(target)) return fail('cannot engage aerial target');
   if (unit.ammo <= 0) return fail('no rounds remaining');
   const range = unit.type.range || 10;
   const dist = hexDistance(unit.hex, target.hex);
@@ -846,7 +1011,9 @@ export function artilleryBarrage(unit, hex, ctx = {}) {
   if (occupant && occupant.faction === unit.faction) {
     return fail('friendly forces on target hex — fire mission denied');
   }
-  if (occupant && targetCategory(occupant) === 'air') occupant = null; // can't shell a UAV
+  // Shells go where they are aimed and aircraft are not there — the hex is
+  // treated as empty (UAV or gunship alike).
+  if (occupant && isAirUnit(occupant)) occupant = null;
 
   const R = getRng(ctx);
   spendAttack(unit);
@@ -896,8 +1063,7 @@ export function artilleryBarrage(unit, hex, ctx = {}) {
   if (unit.typeId === 'mlrs') {
     for (const n of hexNeighbors(hex)) {
       const v = unitAt(n);
-      if (v && v.alive && v.faction !== unit.faction &&
-          targetCategory(v) !== 'air') {
+      if (v && v.alive && v.faction !== unit.faction && !isAirUnit(v)) {
         const killed = applyDamage(v, MLRS_SPLASH, unit);
         report.splash.push({ unit: v, dmg: MLRS_SPLASH, killed });
         log(`Rocket splash hits ${label(v)} — ${MLRS_SPLASH} dmg.`);
@@ -926,7 +1092,7 @@ export function previewAttack(attacker, defender, opts = {}) {
 
     if (attacker.typeId === 'fpv_drone') {
       out.mode = 'fpv';
-      if (isInfra || defender.typeId === 'recon_drone') return out;
+      if (isInfra || isAirUnit(defender)) return out;
       if (attacker.ammo <= 0 || dist < 1 || dist > (attacker.type.range || 4)) return out;
       let d = strikeDamage(attacker, defender, {
         mode: 'fpv', preview: true,
@@ -944,7 +1110,7 @@ export function previewAttack(attacker, defender, opts = {}) {
 
     if (attacker.typeId === 'loiter_munition') {
       out.mode = 'loiter';
-      if (!isInfra && defender.typeId === 'recon_drone') return out;
+      if (!isInfra && isAirUnit(defender)) return out;
       if (attacker.ammo <= 0 || dist < 1 || dist > (attacker.type.range || 10)) return out;
       let d = isInfra ? 4 : strikeDamage(attacker, defender, {
         mode: 'loiter', preview: true,
@@ -962,7 +1128,7 @@ export function previewAttack(attacker, defender, opts = {}) {
       out.mode = 'barrage';
       if (attacker.ammo <= 0 || dist < 1 || dist > (attacker.type.range || 0)) return out;
       if (isInfra) { out.dmg = infraShellDamage(attacker, null, true); return out; }
-      if (targetCategory(defender) === 'air') return out;
+      if (isAirUnit(defender)) return out;
       const fx = infraFx();
       const forcedBlind = attacker.faction === 'red' && fx.commsDead;
       const seen = !forcedBlind && safeVisible(defender.hex);
@@ -980,7 +1146,7 @@ export function previewAttack(attacker, defender, opts = {}) {
     // direct
     if (isInfra) return out;
     const cat = targetCategory(defender);
-    if (cat === 'air' && attacker.typeId !== 'aa') return out;
+    if (cat === 'air' && !canEngageAir(attacker)) return out;
     if (((attacker.type.attack && attacker.type.attack[cat]) || 0) <= 0) return out;
     if (attacker.type.ammo > 0 && attacker.ammo <= 0) return out;
     const range = attacker.type.range || 0;

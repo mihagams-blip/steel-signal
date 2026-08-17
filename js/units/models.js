@@ -3173,6 +3173,7 @@ const FOOTPRINT = {
   spg: [6.00, 3.92, 2.50],
   mlrs: [6.10, 3.44, 2.90],
   aa: [5.50, 3.28, 2.60],
+  sam: [6.50, 3.90, 3.60],
   ew: [5.62, 3.20, 3.00],
   truck: [6.10, 2.62, 2.55],
   loiter_munition: [5.96, 2.60, 2.70],
@@ -3181,6 +3182,10 @@ const FOOTPRINT = {
   fpv_drone: [2.80, 2.40, 1.05],
   // airborne: the wing is the caster, and the decal sits on the ground under it
   recon_drone: [2.90, 4.20, 1.20],
+  // The gunship's caster is the fuselage plus a hint of disc, NOT the full 6.4 u
+  // rotor: a literal disc shadow is a black pool two thirds the width of the hex
+  // and it swallows the terrain the unit is supposed to be flying over.
+  helo: [5.60, 3.20, 1.70],
 };
 
 let _shadowGeo = null;
@@ -4259,6 +4264,132 @@ function modelAA(root, P) {
   ]);
 }
 
+// ---------------------------------------------------------------- ROUND-7: sam
+// Long-range SAM battery. It sits directly beside the SHORAD in the roster and
+// the player has to tell them apart in one glance from 115 u up, so nothing
+// about the silhouette is shared:
+//   SHORAD  — 3 axles, compact turret, small flat radar plate, four SHORT tubes
+//             lying at 32°. Reads as a gun-height vehicle.
+//   SAM     — 4 axles and a metre longer, four BIG canisters standing at 62°
+//             (nothing else in the game points at the sky), and a two-storey
+//             search-radar array on a mast at the rear. Reads as a structure on
+//             wheels: two tall peaks over a long hull.
+// It is also the only vehicle in the roster with deployed outriggers down —
+// the "emplaced, not driving" cue that matches its move 3.
+function modelSAM(root, P) {
+  const TOP = 1.76;
+  part(root, 'sam:hull', P, AO(0.0, 3.4, 0.44), (B) => {
+    // long 8×8 chassis
+    B.box('armor', [6.30, 0.34, 2.00], [-0.10, 0.86, 0], { shade: 0.88 });
+    B.side('armor', [
+      [1.15, 0.98], [2.92, 0.98], [3.22, 1.32], [3.22, 2.02], [2.58, 2.42], [1.15, 2.42],
+    ], 2.14, [0, 0, 0]);
+    B.box('optics', [0.08, 0.58, 1.86], [2.94, 2.02, 0], { rz: 0.58, shade: 1.3 });
+    const xs = [2.42, 1.24, -1.50, -2.62];
+    addWheels(B, xs, 1.46, 0.60, 0.46);
+    for (const s of [-1, 1]) {
+      for (const x of xs) {
+        B.box('armor', [1.12, 0.24, 0.30], [x, 1.14, s * 1.34], { shade: 1.05 });
+      }
+      B.box('optics', [0.50, 0.36, 0.05], [1.86, 1.94, s * 1.09], { shade: 1.25 });
+      B.cyl('optics', 0.12, 0.12, 0.10, 10, [3.20, 1.30, s * 0.74], 'x', { shade: 1.3 });
+      // deployed outriggers: leg out, foot down, pad on the dirt. This is the
+      // whole "emplaced" read and it is why the battery moves 3.
+      B.box('dark', [0.30, 0.22, 0.86], [-0.40, 1.06, s * 1.52], { shade: 1.0 });
+      B.cyl('dgrey', 0.10, 0.10, 1.06, 8, [-0.40, 0.54, s * 1.92], 'y', { shade: 1.12 });
+      B.cyl('dgrey', 0.34, 0.30, 0.12, 12, [-0.40, 0.06, s * 1.92], 'y', { shade: 0.94 });
+      B.box('dark', [0.30, 0.22, 0.86], [-3.02, 1.06, s * 1.52], { shade: 1.0 });
+      B.cyl('dgrey', 0.10, 0.10, 1.06, 8, [-3.02, 0.54, s * 1.92], 'y', { shade: 1.12 });
+      B.cyl('dgrey', 0.34, 0.30, 0.12, 12, [-3.02, 0.06, s * 1.92], 'y', { shade: 0.94 });
+      addTowCable(B, -2.20, -0.90, 1.50, s * 1.24, 0.10);
+    }
+    // deck, launcher turntable ring, power/coolant group behind the cab
+    B.box('armor', [4.30, 0.16, 2.10], [-1.05, TOP - 0.06, 0], { shade: 0.96 });
+    B.cyl('armor', 0.76, 0.82, 0.16, 16, [-1.20, TOP + 0.06, 0], 'y', { shade: 1.06 });
+    B.box('armor', [1.00, 0.62, 1.70], [0.86, TOP + 0.25, 0], { shade: 0.94 });
+    for (let i = 0; i < 4; i++) {
+      B.box('dark', [0.06, 0.44, 1.60], [0.50 + i * 0.24, TOP + 0.25, 0], { shade: 0.86 });
+    }
+    B.cyl('dark', 0.26, 0.26, 0.62, 10, [1.30, TOP + 0.66, -0.56], 'y',
+      { shade: 0.9, tint: HEAT });
+    addAntenna(B, 1.36, TOP + 0.60, 0.78, 1.55, -0.05);
+    addStowage(B, -3.10, TOP + 0.10, 0.60, 0.9);
+    addJerrycans(B, -3.20, TOP + 0.18, -0.62, 2);
+  });
+
+  addDecals(root, P, [
+    { c: 'num', p: [1.90, 1.42, 1.075], w: 0.52, h: 0.28, mirror: true },
+    { c: 'fac', p: [-2.60, 1.42, 1.005], w: 0.36, h: 0.36, mirror: true },
+    { c: DECAL_HAZARD, p: [-0.90, 1.44, 1.005], w: 0.26, h: 0.26, mirror: true },
+    { c: DECAL_PANEL, p: [-2.70, TOP + 0.03, 0.62], f: 'y+', w: 0.38, h: 0.26 },
+  ]);
+
+  // ---- search radar: a tall planar array on its own mast at the rear, sweeping
+  // continuously. Same idle-sweep trick the SHORAD's plate uses (onBeforeRender,
+  // wall clock — no engine hook), but four times the panel and twice the height,
+  // because "there is a radar looking for aircraft here" is the unit's identity.
+  const radar = node(root, 'radar', -3.02, TOP + 0.10, 0);
+  part(radar, 'sam:radar', P, AO(0, 2.6, 0.7, TOP + 0.10), (B) => {
+    B.cyl('armor', 0.34, 0.42, 0.30, 12, [0, 0.12, 0], 'y', { shade: 1.02 });
+    B.cyl('dark', 0.16, 0.18, 0.62, 10, [0, 0.56, 0], 'y', { shade: 1.1 });
+    B.box('armor', [0.44, 0.26, 0.90], [0, 0.90, 0], { shade: 1.04 });
+    // the array itself: face, backing frame, waveguide ribs
+    B.box('armor', [0.18, 2.05, 1.62], [0.06, 1.98, 0], { rz: -0.14, shade: 1.12 });
+    B.box('dark', [0.07, 1.86, 1.46], [-0.05, 1.98, 0], { rz: -0.14, shade: 0.84 });
+    for (let i = 0; i < 7; i++) {
+      B.box('dark', [0.05, 0.06, 1.50], [0.16, 1.10 + i * 0.30, 0],
+        { rz: -0.14, shade: 1.22 });
+    }
+    for (const s of [-1, 1]) {
+      B.strut('dgrey', [-0.10, 1.16, s * 0.72], [-0.34, 1.98, 0], 0.045, 5, { shade: 1.05 });
+      B.box('optics', [0.10, 0.16, 0.16], [0.14, 2.98, s * 0.66], { shade: 1.28 });
+    }
+  });
+  const samClock = (typeof performance !== 'undefined' && performance.now)
+    ? () => performance.now()
+    : () => Date.now();
+  const sweep = () => { radar.rotation.y = (samClock() % 3600000) * 0.00031; };
+  for (const m of radar.children) m.onBeforeRender = sweep;
+
+  // ---- launcher: turntable ('turret') carrying the erected canister pack
+  // ('barrel', forward of its parent origin per the file header, so muzzle FX
+  // and recoil hook up exactly like every gun in the roster).
+  const turret = node(root, 'turret', -1.20, TOP + 0.20, 0);
+  part(turret, 'sam:mount', P, AO(0, 3.4, 0.5, TOP + 0.20), (B) => {
+    B.cyl('armor', 0.62, 0.70, 0.26, 14, [0, 0.10, 0], 'y', { shade: 1.04 });
+    B.box('armor', [1.10, 0.44, 1.42], [0.08, 0.36, 0], { shade: 1.0 });
+    for (const s of [-1, 1]) {
+      B.box('armor', [0.34, 0.62, 0.26], [0.44, 0.62, s * 0.66], { shade: 1.06 });
+      // elevating ram
+      B.strut('dgrey', [-0.42, 0.30, s * 0.50], [0.34, 0.92, s * 0.50], 0.09, 8,
+        { shade: 1.12 });
+    }
+    B.box('dark', [0.30, 0.26, 0.34], [-0.52, 0.46, 0.52], { shade: 1.1 });
+  });
+
+  const barrel = node(turret, 'barrel', 0.44, 0.62, 0);
+  barrel.rotation.z = 62 * DEG;
+  part(barrel, 'sam:canisters', P, AO(0, 3.0, 1, TOP + 0.82), (B) => {
+    // erector frame
+    B.box('armor', [2.90, 0.14, 1.30], [1.18, -0.42, 0], { shade: 0.96 });
+    for (const dz of [-0.62, 0.62]) {
+      B.box('armor', [2.86, 0.34, 0.10], [1.18, -0.16, dz], { shade: 1.02 });
+    }
+    // four square canisters, 2×2, with frangible end caps and lift lugs
+    for (const dy of [-0.02, 0.62]) {
+      for (const dz of [-0.34, 0.34]) {
+        B.box('armor', [2.74, 0.58, 0.58], [1.20, dy, dz], { shade: 1.0 });
+        B.box('dgrey', [0.10, 0.52, 0.52], [2.62, dy, dz], { shade: 1.18 });
+        B.box('dark', [0.08, 0.60, 0.60], [-0.16, dy, dz], { shade: 0.88 });
+        for (let i = 0; i < 3; i++) {
+          B.box('dark', [0.07, 0.60, 0.60], [0.30 + i * 0.86, dy, dz], { shade: 1.08 });
+        }
+      }
+    }
+    B.box('dark', [0.26, 0.24, 1.34], [-0.30, 0.30, 0], { shade: 1.05 });
+  });
+}
+
 function modelEW(root, P) {
   part(root, 'ew:hull', P, AO(0.0, 4.2, 0.46), (B) => {
     B.box('armor', [5.40, 0.30, 1.80], [-0.10, 0.80, 0], { shade: 0.88 });
@@ -4364,13 +4495,50 @@ function modelEW(root, P) {
   ]);
 }
 
-// Camera distance (world units) at which the squad collapses to a scraped
-// fighting position. The default RTS camera sits ~115 out and the zoom clamp is
-// 15–260, so this keeps full fidelity for every shot the player actually
-// inspects and pays nothing for the 30-unit-tall pixels at strategic zoom —
-// identification at that range is the counter's job (fx/markers.js), not the
-// geometry's.
-const INFANTRY_LOD_FAR = 90;
+// ============================================================ ROUND-7 FIX 3
+// PLAYER REPORT: "if an FPV attacks infantry, you cannot see the units it is
+// attacking."
+//
+// The suspected cause was that THREE.LOD picks its level from the wrong camera
+// during an FPV dive. VERIFIED FALSE, and worth writing down so nobody chases
+// it again: `WebGLRenderer.projectObject()` calls `LOD.update(camera)` with the
+// camera the current render pass was handed, `js/core/engine.js` renders the
+// beauty pass and the half-res AO normal pass with the SAME `engine.camera`
+// object, and `js/fx/dronecam.js` flies THAT object rather than swapping in a
+// second camera. The level therefore always follows the eye that is about to
+// draw the frame. It also never mattered: an FPV strike is range ≤ 4 and hexes
+// are 9–10.4 world units apart (terrain.js HEX.size 6), so the whole dive
+// happens inside ~50 units of the target — far below any plausible threshold.
+//
+// The REAL cause was this constant, and the arithmetic in the comment that used
+// to sit here. MEASUREMENT, from the source:
+//     engine.js  DEFAULT_DIST = 115           (the camera you boot into)
+//     dronecam.js FALLBACK_OFFSET length 118  (where restoreCamera() puts you,
+//                                              pre-aimed AT the unit you just
+//                                              hit, as the static fades)
+//     old INFANTRY_LOD_FAR = 90
+// 115 > 90 and 118 > 90, so the *default* view — and specifically the framed,
+// pre-aimed view the player is given at the end of every FPV strike — was
+// already past the switch. What the far level draws is a scraped fighting
+// position: spoil ring, sandbags, two crates and NO SOLDIERS. The player flew a
+// drone into a hole in the ground and got a damage float over empty dirt.
+//
+// Two changes, because either alone still leaves a hole:
+//   1. The threshold moves out past the whole "inspect" band. 170 sits above
+//      the boot distance (115), above the post-dive restore (118) and above a
+//      comfortable zoomed-out working view, and still buys the saving back on
+//      the top third of the 15–260 zoom clamp.
+//   2. The far level gets two simplified bodies in it, so even at strategic
+//      zoom the position reads as MANNED rather than abandoned. A hole with men
+//      in it is the whole point of the counter-plus-geometry pair.
+// MODEL PREDICTION for the readability half: at fov 40 on a 1080-line viewport
+// a 1.7 u standing soldier is 1.7/115 rad ≈ 23 px tall at the default distance
+// and ≈ 15 px at the new threshold — legible as a person in both cases.
+//
+// Infantry is the ONLY type in this file with an LOD; every other class is
+// single-level and already draws full geometry at any distance, so nothing else
+// needed a near level for the dronecam.
+const INFANTRY_LOD_FAR = 170;
 
 function modelInfantry(root, P) {
   // THREE.LOD is updated by the renderer itself (projectObject), so this needs no
@@ -4415,6 +4583,13 @@ function modelInfantry(root, P) {
     addSandbags(B, -0.42, 0.92, 2.70, 3);
     B.box('armor', [0.52, 0.26, 0.38], [-0.94, 0.36, -0.46], { ry: 0.32, shade: 0.96 });
     B.box('dark', [0.42, 0.22, 0.30], [0.34, 0.34, 0.66], { ry: -0.4, shade: 1.02 });
+    // ROUND-7 FIX 3, half two: the position is MANNED at every zoom. Two bodies
+    // only, and the cheapest two poses (the prone silhouette is four boxes and
+    // a helmet), because the job here is "someone is in that hole", not a
+    // second squad. The kneeling one is what carries it: a vertical torso plus
+    // a helmet sphere is the shape the eye reads as a person at 15 px.
+    soldier(B, -0.34, -0.20, -0.06, 'kneel', { weapon: 'rifle' });
+    soldier(B, 1.06, 0.72, 0.22, 'prone', { weapon: 'rifle' });
   }, 1.1);
   // No badge here any more — fx/markers.js carries one over every unit at every
   // zoom, and two of them stacked at different heights read as a bug.
@@ -4631,6 +4806,154 @@ function modelReconDrone(root, P) {
   rotor(props, P, 'recon:rotor', 0.44, 2);
 }
 
+// ---------------------------------------------------------------- ROUND-7: helo
+// Attack helicopter. The read has to survive at RTS zoom with no counter, from
+// a 38°-down camera ~115 u out, so the silhouette is built out of the four cues
+// that say "helicopter" before any detail resolves:
+//   1. a 6.4 u main rotor DISC — by far the widest thing on the model, and the
+//      only spinning translucent plane in the roster;
+//   2. a long thin tail boom ending in a VERTICAL disc (the tail rotor);
+//   3. stub wings hung with fat pylon stores, which is what separates a gunship
+//      from a transport at a glance;
+//   4. skids, i.e. no wheels and no tracks — nothing else in the roster has
+//      that, so it reads as an aircraft even in silhouette.
+// Everything is parented under 'lift', exactly like the recon UAV: groundModel()
+// skips 'lift' sub-trees, so the model keeps its hover altitude and the contact
+// shadow (added on the root afterwards) stays on the dirt underneath it.
+function modelHelo(root, P) {
+  const lift = node(root, 'lift', 0, 5.10, 0);
+  // Nose-down attitude. A helicopter in level flight is pitched forward, and
+  // 5° is the cheapest possible way to say "this is flying" instead of "this is
+  // parked in the air".
+  lift.rotation.z = -5 * DEG;
+
+  part(lift, 'helo:body', P, AO(-1.5, 1.3, 0.66), (B) => {
+    // ---- fuselage pod: side profile (x = length, y = height), extruded across Z
+    B.side('armor', [
+      [-1.62, -0.28], [-0.30, -0.60], [1.40, -0.62], [2.16, -0.34],
+      [2.42, 0.02], [2.06, 0.34], [0.90, 0.60], [-0.55, 0.66], [-1.62, 0.40],
+    ], 1.16, [0, 0, 0], { shade: 0.96 });
+    // nose cap + chin fairing under the sensor turret
+    B.cone('armor', 0.30, 0.42, 10, [2.60, 0.02, 0], 'x', { shade: 1.04 });
+    B.box('armor', [0.90, 0.30, 0.74], [1.86, -0.52, 0], { rz: 0.10, shade: 0.92 });
+
+    // ---- tandem cockpit: gunner low and forward, pilot stepped up behind.
+    // Two separate glass boxes rather than one canopy — the step between them
+    // is the classic gunship profile and it survives to a dozen pixels.
+    B.box('optics', [0.86, 0.34, 0.90], [1.66, 0.42, 0], { rz: -0.16, shade: 1.28 });
+    B.box('optics', [0.90, 0.40, 0.98], [0.72, 0.66, 0], { rz: -0.06, shade: 1.24 });
+    B.box('dark', [0.10, 0.30, 0.96], [1.19, 0.56, 0], { shade: 1.05 });
+    B.box('armor', [0.16, 0.26, 1.02], [0.24, 0.76, 0], { shade: 1.02 });
+
+    // ---- engine deck + exhaust suppressors either side of the mast
+    for (const s of [-1, 1]) {
+      B.cyl('dark', 0.30, 0.32, 1.30, 10, [-0.62, 0.62, s * 0.44], 'x',
+        { shade: 0.94, tint: HEAT });
+      B.cyl('dark', 0.20, 0.26, 0.34, 8, [-1.34, 0.66, s * 0.44], 'x',
+        { rz: 0.22, shade: 0.82, tint: HEAT });
+      // intake screen, forward of the nacelle
+      B.box('dark', [0.14, 0.30, 0.34], [0.06, 0.66, s * 0.44], { shade: 1.12 });
+    }
+    // mast fairing + swashplate stack
+    B.cyl('armor', 0.26, 0.34, 0.34, 10, [0.02, 0.86, 0], 'y', { shade: 1.06 });
+    B.cyl('dark', 0.14, 0.14, 0.30, 8, [0.02, 1.06, 0], 'y', { shade: 1.18 });
+    B.cyl('dark', 0.22, 0.22, 0.07, 10, [0.02, 1.10, 0], 'y', { shade: 1.24 });
+
+    // ---- tail boom, fin, stabiliser, tail gearbox
+    B.cyl('armor', 0.13, 0.21, 1.90, 10, [-2.55, 0.20, 0], 'x', { shade: 1.0 });
+    B.side('armor', [
+      [-3.62, 0.10], [-3.02, 0.06], [-2.86, 0.72], [-3.30, 1.04], [-3.66, 0.92],
+    ], 0.20, [0, 0, 0], { shade: 1.08 });
+    // ventral fin — stops the boom reading as a floating stick
+    B.side('armor', [
+      [-3.46, -0.44], [-2.94, 0.04], [-3.50, 0.06],
+    ], 0.16, [0, 0, 0], { shade: 0.94 });
+    B.box('armor', [0.52, 0.09, 1.66], [-2.86, 0.30, 0], { shade: 1.10 });
+    for (const s of [-1, 1]) {
+      B.box('armor', [0.30, 0.34, 0.07], [-2.90, 0.44, s * 0.80], { shade: 1.04 });
+    }
+    B.box('dark', [0.34, 0.36, 0.30], [-3.30, 0.60, 0.16], { shade: 1.12 });
+
+    // ---- stub wings + stores. The pylons are the "gunship" tell, so they are
+    // deliberately chunky: a quad ATGM box outboard, a rocket pod inboard.
+    for (const s of [-1, 1]) {
+      // B.plan extrudes upward and maps the outline's lateral axis to −Z, so the
+      // s = +1 wing is the one that needs the yaw flip, not the s = −1 one.
+      B.plan('armor', [
+        [0.62, 0.56], [0.62, 1.72], [-0.52, 1.66], [-0.72, 0.56],
+      ], 0.16, [0, 0.02, 0], { ry: s > 0 ? Math.PI : 0, shade: 1.06 });
+      B.box('armor', [0.30, 0.34, 0.22], [0.05, -0.10, s * 1.62], { shade: 1.0 });
+      B.box('armor', [0.26, 0.30, 0.20], [0.02, -0.08, s * 0.98], { shade: 1.0 });
+      // outboard: four-round ATGM launcher. The tubes are 0.20 longer than the
+      // box on purpose — four dark muzzle circles standing proud of the end
+      // face are the difference between "missile launcher" and "grey crate".
+      B.box('dark', [1.06, 0.46, 0.46], [0.10, -0.34, s * 1.58], { shade: 1.02 });
+      for (const dy of [-0.46, -0.22]) {
+        for (const dz of [-0.11, 0.11]) {
+          B.cyl('dgrey', 0.095, 0.095, 1.26, 8, [0.10, dy, s * 1.58 + dz], 'x',
+            { shade: 1.14 });
+        }
+      }
+      // inboard: rocket pod
+      B.cyl('dark', 0.27, 0.27, 1.16, 12, [0.06, -0.30, s * 0.98], 'x', { shade: 0.96 });
+      B.cyl('dgrey', 0.22, 0.22, 0.10, 12, [0.66, -0.30, s * 0.98], 'x', { shade: 1.2 });
+      B.cone('dark', 0.27, 0.22, 12, [-0.58, -0.30, s * 0.98], 'x',
+        { ry: Math.PI, shade: 1.05 });
+
+      // ---- skids: two longitudinal tubes on splayed struts
+      B.cyl('dgrey', 0.085, 0.085, 2.90, 8, [-0.05, -1.24, s * 0.86], 'x', { shade: 1.06 });
+      B.cyl('dgrey', 0.085, 0.085, 0.30, 8, [1.48, -1.16, s * 0.86], 'x',
+        { rz: 0.55, shade: 1.06 });
+      B.strut('dgrey', [0.80, -0.60, s * 0.44], [0.86, -1.22, s * 0.86], 0.075, 6,
+        { shade: 1.02 });
+      B.strut('dgrey', [-0.86, -0.58, s * 0.44], [-0.92, -1.22, s * 0.86], 0.075, 6,
+        { shade: 1.02 });
+      // navigation light blister + a whip on the boom
+      B.box('optics', [0.14, 0.10, 0.10], [0.60, -0.04, s * 1.74], { shade: 1.3 });
+    }
+    B.cyl('dark', 0.02, 0.03, 0.66, 6, [-2.30, 0.44, -0.22], 'y', { rz: -0.16, shade: 1.2 });
+    B.box('optics', [0.16, 0.12, 0.12], [-3.66, 0.98, 0], { shade: 1.3 });
+  });
+
+  // Faction devices go on the tail boom flanks and on the fuselage spine. The
+  // spine one is the one that matters: the RTS camera looks DOWN at this unit,
+  // and the rotor blur disc is depthWrite:false, so it reads straight through.
+  addDecals(lift, P, [
+    { c: 'fac', p: [-2.30, 0.24, 0.30], w: 0.40, h: 0.40, mirror: true },
+    { c: 'num', p: [-1.30, 0.16, 0.52], w: 0.44, h: 0.24, mirror: true },
+    { c: 'fac', p: [-0.30, 0.70, 0.0], f: 'y+', w: 0.52, h: 0.52 },
+    { c: DECAL_HAZARD, p: [1.10, -0.56, 0.42], w: 0.22, h: 0.22, mirror: true },
+  ]);
+
+  // ---- rotors. Contract: fx/vfx.js spins every CHILD of 'props' about that
+  // child's own local Y. The main rotor is child 0 (38 rad/s) and the tail rotor
+  // is child 1 (41 rad/s); the tail hub carries rx = +90° so its own local Y
+  // points along the aircraft's Z and the disc stands on edge. Euler order XYZ
+  // means the spin (Y) is applied INSIDE the tilt (X), so the disc keeps
+  // spinning in its own plane instead of tumbling.
+  const props = node(lift, 'props', 0.02, 1.16, 0);
+  rotor(props, P, 'helo:rotor', 3.20, 4);
+  const tail = rotor(props, P, 'helo:tailrotor', 0.62, 3);
+  tail.position.set(-3.32, -0.56, 0.30);
+  tail.rotation.x = Math.PI / 2;
+
+  // ---- chin turret + gun, so muzzle flash / recoil hook up like every other
+  // unit ('barrel' sits forward of its parent origin, per the file header).
+  const turret = node(lift, 'turret', 1.98, -0.72, 0);
+  part(turret, 'helo:turret', P, AO(-0.9, 0.5, 0.7, -0.72), (B) => {
+    B.cyl('armor', 0.28, 0.30, 0.26, 12, [0, 0.10, 0], 'y', { shade: 1.04 });
+    B.box('armor', [0.44, 0.34, 0.46], [0.02, -0.10, 0], { shade: 1.0 });
+    B.sph('optics', 0.19, [-0.14, -0.06, 0], { scale: [1, 0.92, 1], shade: 1.28 });
+    B.box('dark', [0.16, 0.14, 0.30], [0.10, -0.24, 0], { shade: 1.1 });
+  });
+  const barrel = node(turret, 'barrel', 0.34, -0.12, 0);
+  part(barrel, 'helo:gun', P, AO(-0.9, 0.4, 1, -0.84), (B) => {
+    B.cyl('dark', 0.075, 0.085, 0.86, 8, [0.20, 0, 0], 'x', { shade: 1.12 });
+    B.cyl('dgrey', 0.10, 0.10, 0.12, 8, [0.60, 0, 0], 'x', { shade: 1.2 });
+    B.box('dark', [0.22, 0.18, 0.22], [-0.16, 0.02, 0], { shade: 1.05 });
+  });
+}
+
 function modelLoiter(root, P) {
   part(root, 'loiter:launcher', P, AO(0.0, 3.2, 0.46), (B) => {
     B.box('armor', [5.30, 0.30, 1.76], [-0.15, 0.80, 0], { shade: 0.88 });
@@ -4732,6 +5055,8 @@ const BUILDERS = {
   spg: modelSPG,
   mlrs: modelMLRS,
   aa: modelAA,
+  sam: modelSAM,
+  helo: modelHelo,
   ew: modelEW,
   infantry: modelInfantry,
   atgm_team: modelATGM,
@@ -4742,8 +5067,12 @@ const BUILDERS = {
 };
 
 // Approximate model height (world units) — handy for HUD/VFX anchoring.
+// `helo` is measured from the GROUND, not from the airframe: the hover node
+// sits at 5.10 and the rotor plane 1.16 above that, so a counter anchored at
+// 6.9 floats just clear of the disc instead of inside it.
 const HEIGHTS = {
-  mbt: 4.0, ifv: 3.8, apc: 3.7, spg: 4.2, mlrs: 3.2, aa: 3.8, ew: 7.4,
+  mbt: 4.0, ifv: 3.8, apc: 3.7, spg: 4.2, mlrs: 3.2, aa: 3.8, sam: 5.4,
+  helo: 6.9, ew: 7.4,
   infantry: 1.5, atgm_team: 1.3, truck: 3.7, fpv_drone: 2.9,
   recon_drone: 9.1, loiter_munition: 3.3,
 };

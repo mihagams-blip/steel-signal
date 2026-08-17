@@ -68,10 +68,39 @@
 //     AND a comms-log line, so a systematically broken RED can never again
 //     present as four turns of polite silence.
 
+// AIR ROUND (player feedback: "add a helicopter unit type" / "add an anti-air
+// unit type"). RED now flies, and RED now shoots at things that fly — and the
+// player has to SEE both happen:
+//
+//   • The gunship makes real attack RUNS. If prey is already inside its rocket
+//     envelope it fires first and then BREAKS AWAY out of the player's missile
+//     rings; if not, it comes in low, then fires from the new position the same
+//     phase (move and fire are separate actions, exactly as for the player).
+//     It hunts armour and batteries, never infantry in a town — the numbers in
+//     GAMEPLAY §1 make that the right call and the AI follows the numbers.
+//   • It routes around BLUE air defence when it can and accepts the ring when
+//     the target is worth it, so a well-placed SHORAD visibly bends RED's
+//     flight path instead of being ignored.
+//   • RED's SHORAD and SAM battery SLEW TO THE AXIS: they remember where BLUE
+//     aircraft have been coming from and reposition so their envelope stands
+//     between that axis and the guns. Then they shoot: any BLUE UAV or
+//     helicopter they can see inside their envelope is engaged on RED's own
+//     turn, on top of the free auto-engagement combat.js runs when a BLUE
+//     airframe flies into the ring during BLUE's turn.
+//   • Air defence holds its missiles: it will not spend a round on a rifle
+//     section while anything of BLUE's is still airborne.
+//
+// Nothing about the earlier drone round moved: FPV strikes with the dronecam,
+// the loiter battery's chokepoint weighting, artillery interdiction of the
+// crossing and the recon patrol are all untouched, and every new behaviour is
+// keyed on capability (isAirUnit / canEngageAir), so a scenario without a
+// gunship or a battery in its order of battle behaves exactly as before.
+
 import { hexDistance, hexToWorld, hexNeighbors } from '../world/terrain.js';
 import { isVisible } from './fog.js';
 import {
   resolveAttack, fpvStrike, loiterStrike, artilleryBarrage, previewAttack,
+  isAirUnit, canEngageAir, airDefenceCovering,
 } from './combat.js';
 
 // --------------------------------------------------------------- pacing knobs
@@ -113,8 +142,26 @@ const LOITER_CHOKE_MULT = 1.35;
 
 const ARTY_IDS = ['spg', 'mlrs'];
 const DRONE_STRIKE_IDS = ['fpv_drone', 'loiter_munition'];
-const ARMOR_VALUE_IDS = new Set(['mbt', 'ifv', 'spg', 'mlrs', 'aa', 'apc']);
-const COMBAT_IDS = new Set(['mbt', 'ifv', 'apc', 'infantry', 'atgm_team', 'aa']);
+const ARMOR_VALUE_IDS = new Set(['mbt', 'ifv', 'spg', 'mlrs', 'aa', 'sam', 'apc']);
+const COMBAT_IDS = new Set(['mbt', 'ifv', 'apc', 'infantry', 'atgm_team', 'aa', 'sam']);
+// What the batteries are there to keep alive — and what a gunship goes hunting.
+const HIGH_VALUE_IDS = new Set(['spg', 'mlrs', 'loiter_munition']);
+const HELO_PREY_IDS = ARMOR_VALUE_IDS;
+
+// --------------------------------------------------------------- air knobs
+// A gunship is a 260-point airframe with no replacement path, so it breaks off
+// earlier than a rifle section does — hp 4 instead of hp 2.
+const HELO_BINGO_HP = 5;
+const HELO_MIN_EV = 2;          // below this the run is not worth the airframe
+// Cost of ending a leg inside an enemy air-defence envelope, in the same
+// arbitrary units pickHex scores in. Deliberately SMALLER than the +100 a
+// firing position is worth: a gunship accepts a missile ring for a real target
+// (that trade is the air war) but takes the clean lane when one exists at the
+// same range. Point defence fires every single time an aircraft enters, so it
+// scares the flight path more than a battery that gets one launch per phase.
+const AD_RISK_POINT = 70;
+const AD_RISK_BATTERY = 45;
+const AIR_AXIS_MEMORY = 4;      // turns RED remembers where BLUE air came from
 
 const hidden = () =>
   (typeof document !== 'undefined' && document.hidden === true);
@@ -171,8 +218,31 @@ function initiativeOf(u) {
   if (u.typeId === 'recon_drone') return 0;
   if (ARTY_IDS.includes(u.typeId)) return 1;
   if (DRONE_STRIKE_IDS.includes(u.typeId)) return 2;
-  if (u.typeId === 'aa' || u.typeId === 'ew') return 3;
+  // The gunship flies its run AFTER the guns have had their say, so a
+  // suppressed target is what it finds — the same combined-arms order a human
+  // would use — and BEFORE the ground units close, so the player watches the
+  // air attack develop instead of finding it buried in a column of tank fire.
+  if (isGunship(u)) return 2;
+  if (isAirDefence(u) || u.typeId === 'ew') return 3;
   return 4;
+}
+
+/** RED's own air-defence units (SHORAD, SAM battery, whatever units.js adds). */
+function isAirDefence(u) {
+  return canEngageAir(u) && ((u.type && u.type.range) || 0) >= 1;
+}
+
+/**
+ * An ARMED aircraft — the gunship brain's subject. The recon UAV is an air unit
+ * too and must NOT fall into it: it has range 0 and keeps its own patrol brain.
+ */
+function isGunship(u) {
+  return isAirUnit(u) && ((u.type && u.type.range) || 0) >= 1;
+}
+
+/** SHORAD-class point defence — fires at every airframe that enters, always. */
+function isPointDefence(u) {
+  return traits(u).includes('intercept') || u.typeId === 'aa';
 }
 
 /** Visible to the side that is currently acting (RED, during its own phase). */
@@ -336,24 +406,38 @@ function armLabel(u) {
     case 'spg': return 'RED howitzer battery';
     case 'mlrs': return 'RED MLRS';
     case 'aa': return 'RED SHORAD';
+    case 'sam': return 'RED SAM battery';
+    case 'helo': return 'RED gunship section';
     case 'ew': return 'RED EW truck';
     case 'truck': return 'RED supply column';
     case 'fpv_drone': return 'RED FPV team';
     case 'loiter_munition': return 'RED loitering-munition battery';
     case 'recon_drone': return 'RED recon UAV';
-    default: return 'A RED element';
+    default:
+      // A roster addition should never degrade to "A RED element" — fall back
+      // on the capability, then on the type's own name from the §1 table.
+      if (isGunship(u)) return 'RED gunship section';
+      if (isAirDefence(u)) return 'RED air-defence battery';
+      return u.type && u.type.name ? `A RED ${u.type.name}` : 'A RED element';
   }
 }
 
 function intelLabel(u) {
   if (ARTY_IDS.includes(u.typeId)) return 'artillery net';
   if (u.typeId === 'ew') return 'jamming source';
-  if (u.typeId === 'aa') return 'air-defence radar';
+  if (isAirDefence(u)) return 'air-defence radar';
+  if (isGunship(u)) return 'aviation net';
   if (u.type && (u.type.class === 'armor' || u.type.class === 'mech')) {
     return 'vehicle net';
   }
   if (u.type && u.type.class === 'drone') return 'UAV datalink';
   return 'command net';
+}
+
+/** What the player's own airframe is called in a RED log line. */
+function blueAirName(b) {
+  if (b.type && b.type.name) return `BLUE ${b.type.name}`;
+  return 'a BLUE aircraft';
 }
 
 // ---------------------------------------------------------------------------
@@ -384,7 +468,11 @@ function pickHex(Game, u, scoreFn, opts = {}) {
   for (const h of reach) {
     if (occupied(Game, h)) continue;
     const t = tileAt(Game, h);
-    if (t && !Number.isFinite(t.moveCost)) continue;
+    // Impassable ground is impassable — unless the unit flies. Game.reachableHexes
+    // has already applied the real legality rules (state.js charges a flyer 1 per
+    // hex and ignores water), so for an aircraft this guard was doing nothing but
+    // fencing the UAV and the gunship off the river they are supposed to cross.
+    if (t && !Number.isFinite(t.moveCost) && !isAirUnit(u)) continue;
     if (zone && hexDistance(zone.hex, h) > zone.radius) continue;
     const s = scoreFn(h, t);
     if (!Number.isFinite(s)) continue;
@@ -865,7 +953,32 @@ function goalFor(Game, u, posture, blues) {
 // §7.1 Survive (hp < 3): break contact, prefer cover. Score 90.
 async function trySurvive(ctx, u) {
   const Game = ctx.Game;
-  if (u.hp >= 3 || u.moved || u.typeId === 'recon_drone') return false;
+  if (u.moved || u.typeId === 'recon_drone') return false;
+
+  // A damaged aircraft has a different survival problem from a damaged rifle
+  // section: cover is worthless to it and only air defence can finish it, so
+  // it runs from MISSILE ENVELOPES, not from the enemy generally. It also
+  // breaks off earlier — there is no replacement pool for an airframe.
+  if (isAirUnit(u)) {
+    if (u.hp >= HELO_BINGO_HP) return false;
+    const guns = ctx.blues.filter((b) => canEngageAir(b) && b.alive);
+    if (!guns.length) return false;
+    const hex = pickHex(Game, u, (h) => {
+      let margin = 99;
+      for (const b of guns) {
+        margin = Math.min(margin,
+          hexDistance(b.hex, h) - Math.max(1, (b.type.range || 2)));
+      }
+      return margin * 12 - (airDefenceCovering(h, u.faction) ? 80 : 0) -
+        (wasRecently(u, h) ? 10 : 0);
+    });
+    if (!hex) return false;
+    return relocate(ctx, u, hex,
+      `${armLabel(u)} is hit and turns for home over ${placeOf(Game, hex)}.`,
+      `SIGINT: a RED aviation net breaks off ${areaHint(Game, hex)}.`);
+  }
+
+  if (u.hp >= 3) return false;
   const threat = ctx.blues.filter((b) => seen(b.hex));
   if (!threat.length) return false;
   const hex = pickHex(Game, u, (h, t) => {
@@ -1151,24 +1264,60 @@ async function tryDroneCreep(ctx, u) {
     `SIGINT: a RED UAV datalink comes up ${areaHint(Game, hex)}.`, 220);
 }
 
-// §7.2 SHORAD: shoot recon drones, otherwise screen the artillery.
-async function tryAA(ctx, u) {
+/**
+ * The axis BLUE's air comes down. Derived from RED's OWN contact memory — the
+ * hexes where it has actually seen BLUE aircraft in the last few turns — so it
+ * leaks nothing the player has not shown RED, and it is empty until BLUE
+ * genuinely flies something. Cached per phase.
+ */
+function airAxis(ctx) {
+  if (ctx._airAxis !== undefined) return ctx._airAxis;
+  const pts = [];
+  for (const c of MEM.contacts.values()) {
+    if (!c.unit || !c.unit.alive || !isAirUnit(c.unit)) continue;
+    if (ctx.Game.turn - c.turn > AIR_AXIS_MEMORY) continue;
+    pts.push({ hex: c.hex });
+  }
+  ctx._airAxis = pts.length ? centroid(pts) : null;
+  return ctx._airAxis;
+}
+
+// §7.2 AIR DEFENCE — SHORAD and the SAM battery share one brain, split only by
+// their envelope. Priority: shoot anything of BLUE's that is airborne and
+// inside the envelope, otherwise slew the envelope onto the air axis and over
+// the guns. Missiles are NEVER spent on ground targets while BLUE still has
+// something in the air (that gate lives in actUnit).
+async function tryAirDefence(ctx, u) {
   const Game = ctx.Game;
-  if (u.typeId !== 'aa') return false;
+  if (!isAirDefence(u)) return false;
   const range = u.type.range || 2;
-  if (!u.fired && u.ammo > 0) {
-    const drone = ctx.blues.find((b) =>
-      b.typeId === 'recon_drone' && redSees(Game, b.hex) &&
-      hexDistance(u.hex, b.hex) >= 1 && hexDistance(u.hex, b.hex) <= range);
-    if (drone) {
-      const framed = await ctx.cine.frame(drone.hex);
-      Game.emit('log', `${armLabel(u)} engages the BLUE UAV over ${placeOf(Game, drone.hex)}.`);
+
+  if (!u.fired && (!(u.type.ammo > 0) || u.ammo > 0)) {
+    let best = null;
+    let bestS = 0;
+    for (const b of ctx.blues) {
+      if (!isAirUnit(b) || !b.alive) continue;
+      if (!redSees(Game, b.hex)) continue;
+      const d = hexDistance(u.hex, b.hex);
+      if (d < 1 || d > range) continue;
+      const ev = previewAttack(u, b);
+      if (ev.dmg <= 0) continue;
+      // Finishing a crippled airframe is worth more than chipping a fresh one:
+      // a kill is permanent, damage is not (BLUE re-arms and repairs at trucks).
+      const s = ev.dmg * val(b) + (b.hp <= ev.dmg ? 5000 : 0);
+      if (s > bestS) { bestS = s; best = b; }
+    }
+    if (best) {
+      const framed = await ctx.cine.frame(best.hex);
+      Game.emit('log', isPointDefence(u)
+        ? `${armLabel(u)} opens up on ${blueAirName(best)} over ${placeOf(Game, best.hex)}.`
+        : `${armLabel(u)} takes a lock on ${blueAirName(best)} over ${placeOf(Game, best.hex)} and launches.`);
       try {
-        orderAttack(Game, u, drone);
+        orderAttack(Game, u, best);
       } catch (err) {
-        console.error('[ai] SHORAD engagement THREW (systemic — investigate):', err);
+        console.error('[ai] air-defence engagement THREW (systemic — investigate):', err);
         try {
-          Game.emit('log', 'AI ERROR — RED aa engagement failed; see console.');
+          Game.emit('log', `AI ERROR — RED ${u.typeId} engagement failed; see console.`);
         } catch (_) { /* the log bus itself is down */ }
       }
       ctx.stats.shots++;
@@ -1176,23 +1325,203 @@ async function tryAA(ctx, u) {
       return true;
     }
   }
-  const droneThreat = ctx.blues.some((b) => DRONE_STRIKE_IDS.includes(b.typeId) ||
-    b.typeId === 'recon_drone');
-  if (!droneThreat || u.moved) return false;
-  const wards = ctx.reds.filter((v) => ARTY_IDS.includes(v.typeId));
-  if (!wards.length) return false;
-  const uncovered = wards.filter((w) => hexDistance(u.hex, w.hex) > 2);
-  if (!uncovered.length) return false;           // umbrella already in place
+  return false;
+}
+
+/**
+ * Reposition so the envelope stands between BLUE's air axis and the things
+ * worth protecting. This is the half of the ask the player is meant to SEE:
+ * fly a UAV or a gunship down one flank two turns running and RED's battery
+ * visibly slides across to meet it.
+ */
+async function tryAirDefenceCover(ctx, u) {
+  const Game = ctx.Game;
+  if (!isAirDefence(u) || u.moved) return false;
+  const envelope = Math.max(1, u.type.range || 2);
+  const axis = airAxis(ctx);
+  const wards = ctx.reds.filter((v) =>
+    v !== u && (ARTY_IDS.includes(v.typeId) || HIGH_VALUE_IDS.has(v.typeId)));
+  const airThreat = axis || ctx.blues.some((b) =>
+    isAirUnit(b) || DRONE_STRIKE_IDS.includes(b.typeId));
+  if (!airThreat) return false;
+  if (!axis && !wards.length) return false;
+
+  // Already doing the job? Everything under the umbrella and the axis covered.
+  const coversAll = wards.every((w) => hexDistance(u.hex, w.hex) <= envelope);
+  const coversAxis = !axis || hexDistance(u.hex, axis) <= envelope;
+  if (coversAll && coversAxis) return false;
+
   const hex = pickHex(Game, u, (h, t) => {
-    let s = (t ? (t.cover || 0) * 2 : 0) - (inBlueZOC(Game, h, ctx.blues) ? 30 : 0);
-    for (const w of wards) s -= hexDistance(w.hex, h) * 6;
+    let s = (t ? (t.cover || 0) * 2 : 0);
+    for (const w of wards) {
+      s -= Math.max(0, hexDistance(w.hex, h) - envelope) * 8;
+    }
+    if (axis) s -= Math.max(0, hexDistance(axis, h) - envelope) * 7;
+    // An air-defence vehicle is a soft ground target with a radar on the roof.
+    // It screens from behind the line, never from inside a firefight.
+    const fd = frontDist(ctx, h);
+    if (fd <= 2) s -= 90;
+    else if (fd <= 3) s -= 30;
+    s -= (inBlueZOC(Game, h, ctx.blues) ? 30 : 0);
     if (wasRecently(u, h)) s -= 20;
     return s;
   });
   if (!hex) return false;
-  return relocate(ctx, u, hex,
-    `${armLabel(u)} moves its umbrella over the guns at ${placeOf(Game, hex)}.`,
+  const line = axis
+    ? `${armLabel(u)} slews to cover the air approach over ${placeOf(Game, hex)}.`
+    : `${armLabel(u)} moves its umbrella over the guns at ${placeOf(Game, hex)}.`;
+  return relocate(ctx, u, hex, line,
     `SIGINT: a RED air-defence radar radiates ${areaHint(Game, hex)}.`);
+}
+
+// --------------------------------------------------------------------------
+// The gunship. An attack RUN, not a hover: fire-then-break-away if prey is
+// already inside the envelope, ingress-then-fire if it is not. Both halves are
+// visible movement, and both refuse — softly — to end inside a BLUE missile
+// ring when a clean firing position exists at the same range.
+// --------------------------------------------------------------------------
+function adRisk(hex, faction) {
+  const ad = airDefenceCovering(hex, faction);
+  if (!ad) return 0;
+  return isPointDefence(ad) ? AD_RISK_POINT : AD_RISK_BATTERY;
+}
+
+/**
+ * Armour and batteries this gunship could plausibly REACH this phase. The run
+ * is planned against these; a rifle section that happens to be under the nose
+ * is not a reason to burn one of four rockets (measured in the harness: with
+ * "shoot whatever is in the envelope" the gunship spent its run on entrenched
+ * town infantry for 2 damage while an MBT sat three hexes away).
+ */
+function reachablePrey(ctx, u) {
+  const Game = ctx.Game;
+  const reach = ((u.type && u.type.move) || 0) + ((u.type && u.type.range) || 2);
+  return ctx.blues.filter((b) =>
+    b.alive && !isAirUnit(b) && HELO_PREY_IDS.has(b.typeId) &&
+    redSees(Game, b.hex) && hexDistance(u.hex, b.hex) <= reach);
+}
+
+/** Best thing to shoot from where the gunship is standing right now. */
+function heloTarget(ctx, u) {
+  const Game = ctx.Game;
+  const range = u.type.range || 2;
+  let best = null;
+  let bestS = 0;
+  for (const b of ctx.blues) {
+    if (!b.alive || isAirUnit(b)) continue;      // a gunship is not a fighter
+    if (!redSees(Game, b.hex)) continue;
+    const d = hexDistance(u.hex, b.hex);
+    if (d < 1 || d > range) continue;
+    const ev = previewAttack(u, b);
+    if (ev.dmg < HELO_MIN_EV) continue;
+    let s = ev.dmg * val(b);
+    if (canEngageAir(b)) s *= 1.5;               // SEAD: open the lane first
+    if (b.hp <= ev.dmg) s *= 2;                  // a kill beats a chip
+    if (s > bestS) { bestS = s; best = b; }
+  }
+  return best;
+}
+
+async function heloFire(ctx, u) {
+  const Game = ctx.Game;
+  if (u.fired || (u.type.ammo > 0 && u.ammo <= 0)) return false;
+  const best = heloTarget(ctx, u);
+  if (!best) return false;
+  const framed = await ctx.cine.frame(best.hex);
+  Game.emit('log',
+    `${armLabel(u)} runs in on the ${best.type.name} at ${gridOf(best.hex)}.`);
+  try {
+    orderAttack(Game, u, best);
+  } catch (err) {
+    console.error('[ai] gunship run THREW (systemic — investigate):', err);
+    try {
+      Game.emit('log', `AI ERROR — RED ${u.typeId} attack run failed; see console.`);
+    } catch (_) { /* the log bus itself is down */ }
+  }
+  ctx.stats.shots++;
+  await ctx.beat(framed, FIRE_HOLD_MS);
+  return true;
+}
+
+/** Break away: back over RED's own ground, out of the missile rings. */
+async function heloEgress(ctx, u) {
+  const Game = ctx.Game;
+  if (u.moved) return false;
+  const com = centroid(ctx.reds) || homeOf(u);
+  const hex = pickHex(Game, u, (h) => {
+    let s = -adRisk(h, u.faction);
+    s -= hexDistance(com, h) * 3;
+    if (frontDist(ctx, h) <= 1) s -= 40;
+    if (wasRecently(u, h)) s -= 8;
+    return s;
+    // Breaking away IS the action, so a lateral shift is allowed to win.
+  }, { minGain: -3 });
+  if (!hex) return false;
+  return relocate(ctx, u, hex,
+    `${armLabel(u)} breaks away over ${placeOf(Game, hex)}.`,
+    `SIGINT: rotor noise fades ${areaHint(Game, hex)}.`, 220);
+}
+
+/** Come in low on the best prey RED knows about. */
+async function heloIngress(ctx, u) {
+  const Game = ctx.Game;
+  if (u.moved) return false;
+  const range = u.type.range || 2;
+  const prey = ctx.blues.filter((b) =>
+    b.alive && !isAirUnit(b) && HELO_PREY_IDS.has(b.typeId) && redSees(Game, b.hex));
+  const mark = prey.length
+    ? prey.reduce((a, b) => (val(b) > val(a) ? b : a))
+    : null;
+  // With nothing worth a rocket in sight the gunship still has to be somewhere
+  // useful: it holds behind the line, on the axis it expects BLUE to use.
+  const aim = mark ? mark.hex : ctx.anchor;
+  const wantIn = !!mark;
+  const hex = pickHex(Game, u, (h) => {
+    const d = hexDistance(aim, h);
+    let s = 0;
+    if (wantIn) {
+      s += d >= 1 && d <= range ? 100 : 0;       // a firing position is the prize
+      s -= Math.max(0, d - range) * 12;
+      if (d < 1) s -= 200;                       // cannot hover on the target hex
+    } else {
+      const standoff = range + 2;                // loiter behind the contact line
+      s -= Math.abs(d - standoff) * 6;
+    }
+    s -= adRisk(h, u.faction);
+    if (wasRecently(u, h)) s -= 15;
+    return s;
+  }, { minGain: wantIn ? 1 : -2 });
+  if (!hex) return false;
+  const line = wantIn
+    ? `${armLabel(u)} comes in low over ${placeOf(Game, hex)}.`
+    : `${armLabel(u)} holds on the deck over ${placeOf(Game, hex)}.`;
+  return relocate(ctx, u, hex, line,
+    `SIGINT: rotor noise ${areaHint(Game, hex)}.`, 220);
+}
+
+async function tryHeloRun(ctx, u) {
+  if (!isGunship(u)) return false;
+
+  // Something already in the envelope: shoot first, THEN break away — the
+  // player sees the whole run, not a helicopter that parks on top of his tank
+  // and stays there. But a SOFT target under the nose does not get the rocket
+  // while armour is still within a move-plus-range of the airframe: the run
+  // repositions onto the armour instead.
+  const here = heloTarget(ctx, u);
+  const standAndFire = here &&
+    (HELO_PREY_IDS.has(here.typeId) || !reachablePrey(ctx, u).length);
+  if (standAndFire && await heloFire(ctx, u)) {
+    await heloEgress(ctx, u);
+    return true;
+  }
+
+  // Otherwise fly the run in and fire from the new position this same phase.
+  const flown = await heloIngress(ctx, u);
+  if (flown && await heloFire(ctx, u)) return true;
+  // The reposition found nothing better and never happened — take the shot
+  // that WAS on offer rather than idling a 260-point airframe for a phase.
+  if (!flown && here && await heloFire(ctx, u)) return true;
+  return flown;
 }
 
 // §7.8 EW truck (and the supply truck) shadow the main body's centre of mass.
@@ -1380,6 +1709,7 @@ function rotationPool(ctx, strict) {
   return ctx.reds.filter((u) => {
     if (!u.alive || u.moved) return false;
     if (u.type && u.type.class === 'drone') return false;
+    if (isAirUnit(u)) return false;              // aircraft fly runs, not reliefs
     if (onObjective(Game, u.hex)) return false;  // never vacate an objective
     if ((u.entrench || 0) >= 2) {
       const fd = frontDist(ctx, u.hex);
@@ -1476,6 +1806,7 @@ function sappersLine(Game, reds) {
   for (const u of reds) {
     if (!u.alive || u.moved || u.fired) continue;
     if (u.type && u.type.class === 'drone') continue;
+    if (isAirUnit(u)) continue;                 // nothing to dig at 200 feet
     const cap = traits(u).includes('entrench_bonus') ? 3 : 2;
     if ((u.entrench || 0) < cap) n++;
   }
@@ -1505,9 +1836,29 @@ async function actUnit(ctx, u) {
 
   if (await trySurvive(ctx, u)) return true;                       // 90
 
-  if (u.typeId === 'aa') {
-    if (await tryAA(ctx, u)) return true;                          // 75
-    if (await tryDirectAttack(ctx, u)) return true;                // 60
+  // Armed aircraft: the attack run owns the whole decision. Nothing below
+  // applies — a gunship does not advance on an objective, entrench or hold
+  // ground. (The recon UAV is an air unit too and falls through to its own
+  // patrol brain further down; isGunship is what keeps them apart.)
+  if (isGunship(u)) {
+    return tryHeloRun(ctx, u);                                     // 65
+  }
+
+  if (isAirDefence(u)) {
+    if (await tryAirDefence(ctx, u)) return true;                  // 75
+    if (await tryAirDefenceCover(ctx, u)) return true;             // 75
+    // Missiles are for aircraft. While BLUE still has ANYTHING airborne the
+    // battery keeps its rounds — a SAM that shot a rifle section and then had
+    // nothing left for the helicopter is the failure mode this gate exists for.
+    const skyLive = ctx.blues.some((b) => b.alive && isAirUnit(b));
+    if (!skyLive && await tryDirectAttack(ctx, u)) return true;    // 60
+    // An air-defence vehicle only joins the ground advance once there is
+    // nothing left to defend against. Otherwise it stays on its umbrella —
+    // marching the battery onto the objective is how a covered force ends up
+    // uncovered on the turn the player's air finally shows up.
+    const airThreat = skyLive ||
+      ctx.blues.some((b) => b.alive && DRONE_STRIKE_IDS.includes(b.typeId));
+    if (airThreat) return false;
     return tryAdvance(ctx, u);
   }
   if (ARTY_IDS.includes(u.typeId)) {

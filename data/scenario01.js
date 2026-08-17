@@ -239,6 +239,17 @@ const BLUE_FORCE = [
   U('atgm_team', 'blue', 3, 11),
   U('spg', 'blue', 3, 8),
   U('aa', 'blue', 2, 7),
+  // Air defence in two layers (round 7). SHORAD travels with the wedge; the SAM
+  // battery is the umbrella you leave behind. From (3,10) its range-4 envelope
+  // covers ALL 17 other BLUE units on turn 1 and both deploy hexes at exactly 4
+  // — and at move 3 it cannot keep up with a move-5/6 assault, so the moment the
+  // wedge crosses the Vovcha it is outside its own umbrella and RED's gunship
+  // has a window. That trade is the lesson the unit exists to teach.
+  U('sam', 'blue', 3, 10),
+  // Gunship, held one hex off the supply truck at (1,9) so its four missiles can
+  // be replenished (§3.1) without a detour. Flying: 7 hexes over the river, the
+  // mud and every zone of control.
+  U('helo', 'blue', 1, 10, { name: 'Sokil 1' }),
   U('ew', 'blue', 2, 11),
   U('truck', 'blue', 1, 9),
   U('fpv_drone', 'blue', 3, 7, { name: 'Ptakhy A' }),
@@ -280,6 +291,19 @@ const RED_FORCE = [
   U('spg', 'red', 24, 10),        // pulled into town so the AA umbrella covers it
   U('mlrs', 'red', 25, 13),
   U('aa', 'red', 24, 12),         // radius-2 umbrella over SPG + MLRS, not the town flag
+  // Round 7 air layer. RED's SAM is sited two hexes clear of the SHORAD rather
+  // than stacked on it, and deliberately far enough forward that its range-4
+  // envelope reaches the ROAD-BRIDGE EXIT (18,9) — the one hex the whole
+  // scenario is fought over. BLUE cannot fly its gunship over the crossing
+  // until this battery is dealt with, and dealing with it is a real problem:
+  // SPG range 5, MLRS range 7, one loiter round, or a ground push. It is also
+  // grass with no cover and defence 4, so anything that reaches it kills it.
+  U('sam', 'red', 22, 11),
+  // RED's gunship laagers deep, behind the town's northern approach: 18 hexes
+  // from BLUE's lead tank, so even at move 7 it cannot be over the wedge before
+  // turn 3. That is the player's window to bring the SHORAD forward — the same
+  // "bad march order" lesson §8 T3 teaches with the FPV, one echelon up.
+  U('helo', 'red', 23, 8),
   U('ew', 'red', 20, 8),          // dome over the road-bridge approach (§8 T1)
   // drone arm
   U('fpv_drone', 'red', 20, 10),  // covers road bridge + east exit (range 4)

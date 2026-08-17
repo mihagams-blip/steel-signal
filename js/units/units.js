@@ -24,12 +24,30 @@ export function attachTerrain(terrain) {
 // ---------------------------------------------------------------------------
 // Roster — GAMEPLAY.md §1
 //
-//  class    : combined-arms family ('armor'|'mech'|'artillery'|'aa'|'support'|
-//             'infantry'|'drone'). combat.js grants +2 when an adjacent friendly
-//             unit of a DIFFERENT class is working the same target.
+//  class    : combined-arms family ('armor'|'mech'|'artillery'|'aa'|'air'|
+//             'support'|'infantry'|'drone'). combat.js grants +2 when an
+//             adjacent friendly unit of a DIFFERENT class is working the same
+//             target.
 //  icon     : APP-6-ish glyph key consumed by ui/hud.js
 //             ('armor'|'arty'|'aa'|'ew'|'infantry'|'supply'|'drone'|'recon').
+//             ui/hud.js and fx/markers.js both key their glyph tables on
+//             `typeId` FIRST and only fall back to this field, so a type they
+//             have not heard of still draws a sane base symbol.
 //  attack   : rated against the defender's target category (§1.1).
+//
+// AIR LAYER (rounds 7+). js/game/combat.js reads CAPABILITIES, never ids:
+//   trait 'air'    (or class 'air')      -> the unit FLIES. It is an air TARGET
+//                                          (only air defence may engage it), it
+//                                          takes no terrain cover, ignores the
+//                                          river malus, and attacks from above.
+//   trait 'airdef' (or class 'aa')       -> may put its `attack.air` column on
+//                                          an air target and auto-engages enemy
+//                                          air inside its own `range`.
+//   trait 'intercept'                    -> SHORAD point defence: additionally
+//                                          swats inbound FPV / loitering rounds
+//                                          (§4.3). `sam` deliberately does NOT
+//                                          carry it — that stays the SHORAD's
+//                                          one job.
 // ---------------------------------------------------------------------------
 function T(id, name, cls, icon, move, sight, range, soft, hard, air,
   defense, ammo, cost, traits, desc) {
@@ -76,10 +94,36 @@ export const UNIT_TYPES = {
     'Saturation rockets: deepest reach on the map plus 1 splash damage to ' +
     'everything beside the impact hex.'),
 
-  aa: T('aa', 'SHORAD', 'aa', 'aa',
+  // Attack helicopter — the only manoeuvre unit that flies. Range 2 with the
+  // second-best hard column in the game and NOTHING on the ground able to
+  // answer it: its entire counter is the two air-defence types below, which is
+  // why it is priced above an MBT and given defence 3 and four rounds of ammo.
+  helo: T('helo', 'Attack Helicopter', 'air', 'drone',
+    7, 3, 2, 5, 10, 0, 3, 4, 240, ['air'],
+    'Flies: crosses rivers, mud and zones of control at 7 hexes a turn, and ' +
+    'kills armour from two hexes out with no reply from the ground. It takes ' +
+    'no cover and cannot dig in, so air defence eats it alive — a SHORAD ' +
+    'burst is 6 damage and a SAM is 7. Four missiles, then it needs the truck.'),
+
+  // Renamed (player feedback round 7): the owner played a whole scenario
+  // without realising "SHORAD" WAS the anti-air unit. The stat line is
+  // untouched — only the display name and the description changed.
+  aa: T('aa', 'SHORAD Air Defence', 'aa', 'aa',
     5, 3, 2, 2, 1, 9, 5, 6, 130, ['intercept'],
-    'The only unit that can shoot a recon UAV down, and the only thing that ' +
-    'intercepts an inbound FPV or loitering munition.'),
+    'Short-range anti-aircraft: the gun/missile mount that shoots helicopters ' +
+    'and recon UAVs out of the sky two hexes out, and the ONLY thing that ' +
+    'swats an inbound FPV or loitering munition off your tanks. Keep it with ' +
+    'the column, not behind it.'),
+
+  // Long-range area air defence. Deliberately NOT an upgrade of the SHORAD:
+  // double the envelope and a better air column, bought with half the mobility,
+  // one point less armour, no interception and no ground attack whatsoever.
+  sam: T('sam', 'SAM Air Defence Battery', 'aa', 'aa',
+    3, 4, 4, 1, 0, 10, 4, 4, 190, ['airdef'],
+    'Long-range anti-aircraft: a search radar and four canisters that deny ' +
+    'the sky FOUR hexes out — an umbrella you park over what matters, not a ' +
+    'unit you drive. It cannot intercept FPV drones (that is SHORAD work) and ' +
+    'it cannot shoot at the ground at all. Screen it or lose it.'),
 
   ew: T('ew', 'EW Jammer Truck', 'support', 'ew',
     4, 2, 0, 0, 0, 0, 3, 0, 120, ['jammer'],

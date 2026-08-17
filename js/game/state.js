@@ -28,6 +28,8 @@ import {
   loiterStrike as combatLoiterStrike,
   artilleryBarrage as combatArtilleryBarrage,
   effectiveMove,
+  isAirUnit,
+  canEngageAir,
 } from './combat.js';
 import { runAITurn } from './ai.js';
 import { refreshFog, isVisibleTo } from './fog.js';
@@ -66,7 +68,7 @@ const TERRAIN_RULES = {
 
 // §6.1 counts only manoeuvre units towards the "combat-ineffective" threshold.
 const NON_COMBAT_CLASSES = new Set(['support', 'drone']);
-const HARD_TARGET_IDS = new Set(['mbt', 'ifv', 'apc', 'spg', 'mlrs', 'aa']);
+const HARD_TARGET_IDS = new Set(['mbt', 'ifv', 'apc', 'spg', 'mlrs', 'aa', 'sam']);
 
 const key = (h) => `${h.q},${h.r}`;
 const sameHex = (a, b) => !!a && !!b && a.q === b.q && a.r === b.r;
@@ -110,13 +112,29 @@ function hasTrait(u, trait) {
     u.type.traits.includes(trait));
 }
 
+// AUDIO/AIR ROUND — capability, not id. Both of these used to name a typeId,
+// which was survivable while `recon_drone` was the only thing in the sky. With
+// the attack helicopter (class 'air', trait 'air') that stopped being true, and
+// the two failures were not symmetrical: a hard-coded `isFlyer` merely made the
+// gunship pay ground move costs and stop at rivers, but a hard-coded
+// `isGroundHolder` let it CAPTURE OBJECTIVES BY HOVERING. combat.js owns the
+// definition of "air" for the whole codebase (GAMEPLAY §4.6); this file asks it.
 function isFlyer(u) {
-  return !!u && u.typeId === 'recon_drone';
+  return isAirUnit(u);
 }
 
 function isGroundHolder(u) {
-  // Only ground units capture (GAMEPLAY.md §6) — drones fly, they do not hold.
-  return !!u && !!u.type && u.type.class !== 'drone';
+  // Only ground units capture (GAMEPLAY.md §6) — aircraft overfly, they do not
+  // hold. `class !== 'drone'` alone is not the test: the helicopter's class is
+  // 'air'.
+  return !!u && !!u.type && u.type.class !== 'drone' && !isAirUnit(u);
+}
+
+// §2: nothing airborne digs in. Same reason the entrench UI must not offer it.
+function canEntrench(u) {
+  if (!u || !u.type) return false;
+  if (u.type.class === 'drone') return false;
+  return !isAirUnit(u);
 }
 
 function shortestAngle(from, to) {
@@ -659,9 +677,12 @@ export const Game = {
       const d = hexDistance(unit.hex, t.hex);
       if (d < 1 || d > range) continue;
       if (!this.visibleTo(t.hex, unit.faction)) continue;
-      const air = t.typeId === 'recon_drone';
-      if (air) {
-        if (unit.typeId !== 'aa') continue;          // §1.1 only SHORAD
+      // §1.1 / §4.6 — capability, not id. The HUD must offer exactly the set
+      // combat.js will accept: id tests here meant a SAM could not be clicked
+      // onto a helicopter at all, while an MBT was offered a shot combat.js
+      // then refused.
+      if (isAirUnit(t)) {
+        if (!canEngageAir(unit)) continue;
         if ((atk.air || 0) <= 0) continue;
       } else {
         const cat = HARD_TARGET_IDS.has(t.typeId) ? 'hard' : 'soft';
@@ -766,7 +787,7 @@ export const Game = {
   entrench(unit) {
     if (this.phase === 'over' || !unit || !unit.alive) return false;
     if (unit.moved || unit.fired) return false;
-    if (unit.type && unit.type.class === 'drone') return false;
+    if (!canEntrench(unit)) return false;
     const max = hasTrait(unit, 'entrench_bonus') ? ENTRENCH_MAX_SAPPER : ENTRENCH_MAX;
     const before = unit.entrench || 0;
     unit.entrench = Math.min(max, before + 1);
@@ -963,7 +984,7 @@ export const Game = {
     for (const u of this.units) {
       if (!u.alive || u.faction !== side) continue;
       if (u.moved || u.fired) continue;
-      if (u.type && u.type.class === 'drone') continue;
+      if (!canEntrench(u)) continue;
       const max = hasTrait(u, 'entrench_bonus') ? ENTRENCH_MAX_SAPPER : ENTRENCH_MAX;
       if ((u.entrench || 0) < max) u.entrench = (u.entrench || 0) + 1;
     }

@@ -175,6 +175,198 @@ html, body {
 #ss-obj .pip.held { color: var(--friendly); }
 #ss-obj .pip.primary.held { text-shadow: 0 0 7px rgba(126, 216, 139, 0.55); }
 
+/* ---- Audio mixer ------------------------------------------------------- */
+/* Top-right, the last free corner of the frame. Two faders — music and SFX —
+   because "turn the music down" and "turn the guns down" are different
+   requests. Same amber/mint console language as every other panel: stencil
+   heads, mono numerals, a clipped top-right corner, an amber fill on the
+   track. Muted channels go dim-red and read "––" instead of a number, so the
+   state is legible without hovering anything. */
+
+#ss-mixer {
+  right: 12px;
+  top: 12px;
+  width: 178px;
+  padding: 7px 9px 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+#ss-mixer .mx-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+#ss-mixer .mx-head .ss-head { font-size: 12px; }
+
+/* master mute — a labelled LED switch, not a mystery icon */
+.mx-master {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font-head);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-size: 10px;
+  color: var(--text-dim);
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--panel-border);
+  padding: 2px 6px 2px 5px;
+  cursor: pointer;
+  transition: color 0.12s, border-color 0.12s, background 0.12s;
+  clip-path: polygon(0 0, calc(100% - 5px) 0, 100% 5px, 100% 100%, 0 100%);
+}
+.mx-master:hover { color: var(--text); border-color: rgba(232, 163, 61, 0.5); }
+.mx-led {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--friendly);
+  box-shadow: 0 0 6px rgba(126, 216, 139, 0.75);
+  transition: background 0.12s, box-shadow 0.12s;
+}
+.mx-master.off { color: var(--enemy); border-color: rgba(224, 90, 78, 0.55); }
+.mx-master.off .mx-led {
+  background: var(--enemy);
+  box-shadow: 0 0 7px rgba(224, 90, 78, 0.8);
+  animation: mx-led-pulse 1.6s ease-in-out infinite;
+}
+@keyframes mx-led-pulse { 50% { opacity: 0.35; } }
+
+/* one fader row: [mute] LABEL [========] 55 */
+#ss-mixer .mx-row {
+  display: grid;
+  grid-template-columns: 18px 24px 1fr 22px;
+  align-items: center;
+  gap: 6px;
+}
+.mx-ch {
+  width: 18px;
+  height: 16px;
+  display: grid;
+  place-items: center;
+  font-size: 11px;
+  line-height: 1;
+  color: var(--accent);
+  background: rgba(232, 163, 61, 0.10);
+  border: 1px solid rgba(232, 163, 61, 0.38);
+  cursor: pointer;
+  transition: color 0.12s, background 0.12s, border-color 0.12s;
+}
+.mx-ch i { font-style: normal; }
+.mx-ch:hover { background: rgba(232, 163, 61, 0.26); color: #fff; }
+.mx-ch.off {
+  color: var(--enemy);
+  background: rgba(224, 90, 78, 0.10);
+  border-color: rgba(224, 90, 78, 0.42);
+  position: relative;
+}
+.mx-ch.off::after {
+  /* struck through — the universal "this channel is off" */
+  content: '';
+  position: absolute;
+  left: 1px; right: 1px; top: 50%;
+  height: 1px;
+  background: var(--enemy);
+  transform: rotate(-32deg);
+}
+.mx-ch:disabled, .mx-master:disabled { cursor: default; opacity: 0.45; }
+
+#ss-mixer .mx-k {
+  font-family: var(--font-head);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+#ss-mixer .mx-v {
+  font-family: var(--font-mono);
+  font-size: 10px;
+  color: var(--text);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
+#ss-mixer .mx-v.off { color: var(--enemy); }
+
+/* the fader itself — a flat console track with an amber fill and a hard
+   rectangular thumb, drawn identically in WebKit and Gecko */
+.mx-slider {
+  --mx-fill: 50%;
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 14px;
+  background: transparent;
+  cursor: pointer;
+  margin: 0;
+}
+.mx-slider::-webkit-slider-runnable-track {
+  height: 4px;
+  border: 1px solid var(--panel-border);
+  background:
+    linear-gradient(to right,
+      var(--accent) 0 var(--mx-fill),
+      rgba(0, 0, 0, 0.4) var(--mx-fill) 100%);
+}
+.mx-slider::-moz-range-track {
+  height: 4px;
+  border: 1px solid var(--panel-border);
+  background:
+    linear-gradient(to right,
+      var(--accent) 0 var(--mx-fill),
+      rgba(0, 0, 0, 0.4) var(--mx-fill) 100%);
+}
+.mx-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 5px;
+  height: 13px;
+  margin-top: -5px;
+  background: var(--text);
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  box-shadow: 0 0 5px rgba(232, 163, 61, 0.55);
+}
+.mx-slider::-moz-range-thumb {
+  width: 4px;
+  height: 13px;
+  border-radius: 0;
+  background: var(--text);
+  border: 1px solid rgba(0, 0, 0, 0.6);
+  box-shadow: 0 0 5px rgba(232, 163, 61, 0.55);
+}
+.mx-slider.off::-webkit-slider-runnable-track {
+  background: rgba(0, 0, 0, 0.4);
+}
+.mx-slider.off::-moz-range-track { background: rgba(0, 0, 0, 0.4); }
+.mx-slider.off::-webkit-slider-thumb {
+  background: var(--enemy);
+  box-shadow: none;
+}
+.mx-slider.off::-moz-range-thumb { background: var(--enemy); box-shadow: none; }
+.mx-slider:disabled { cursor: default; opacity: 0.5; }
+
+#ss-mixer.all-muted { border-color: rgba(224, 90, 78, 0.35); }
+
+@media (prefers-reduced-motion: reduce) {
+  .mx-master.off .mx-led { animation: none; }
+}
+
+/* Narrow frames: the command bar is centred and ~560–700px wide, so on a
+   small viewport it would reach the mixer. Drop below it instead of letting
+   two panels overlap — the toast strip is centred and never gets this far
+   right, so the slot stays clean. */
+@media (max-width: 1180px) {
+  #ss-mixer {
+    top: 48px;
+    width: 158px;
+  }
+  #ss-mixer .mx-row { grid-template-columns: 16px 22px 1fr 20px; }
+}
+
 /* ---- Toasts ------------------------------------------------------------ */
 
 #ss-toasts {

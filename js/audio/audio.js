@@ -1,13 +1,25 @@
 // STEEL SIGNAL — audio/audio.js
-// Full WebAudio procedural SFX + ambience. Zero asset files: everything is
+// Full WebAudio procedural SFX + ambience. Everything except the music bed is
 // synthesized (filtered noise, oscillators, waveshaping) at call time from a
 // couple of cached noise buffers.
 //
 // Contract (ARCHITECTURE.md):
 //   export const Audio = { init(), sfx(name, opts), setAmbience(on) }
-// Extra export (noted in INTEGRATION_NOTES.md):
+// Extra exports (noted in INTEGRATION_NOTES.md):
 //   export function wireAudio(Game) — subscribes every sfx to the canonical
 //   Game events; main.js calls it once after Game.init. Idempotent.
+//
+// OWNER-FEEDBACK ROUND additions:
+//   · MUSIC BED — audio/theme.m4a, looped. The ONE sanctioned audio asset
+//     (alongside art/units/*.png); everything else here is still procedural.
+//     If the file 404s or will not decode the game runs silently: no throw.
+//   · MIXER — separate music / SFX levels, each independently mutable, plus a
+//     master mute. Persisted in localStorage. ui/hud.js draws the control and
+//     owns the [K] hotkey; this module owns the gain graph and the storage.
+//   · MOVEMENT VOICES — a looping, positional, per-unit-class engine/step
+//     sound that starts when a unit STARTS moving and stops when it arrives.
+//     See `_installMoveHook` for why this wraps `Game.moveUnit` instead of
+//     listening to `unitMoved` (which fires only on arrival).
 //
 // init() must be called from a user gesture (main.js wires pointerdown).
 // Every public entry point is safe to call before init — it just no-ops.
@@ -15,6 +27,119 @@
 // ---------------------------------------------------------------------------
 // internals
 // ---------------------------------------------------------------------------
+
+// --- mixer persistence -----------------------------------------------------
+// One key, one JSON blob, versioned so a future shape change cannot resurrect
+// a stale record as garbage levels. Storage may throw (private mode, disabled
+// cookies, file:// in some browsers) — every access is wrapped.
+
+const MIX_KEY = 'steelsignal.mix.v1';
+const MIX_DEFAULT = Object.freeze({
+  music: 0.55,        // 0..1 slider position, NOT gain (see gainFor)
+  sfx: 1.0,
+  musicMuted: false,
+  sfxMuted: false,
+  muted: false,       // master
+});
+
+// Slider position → linear gain. Squaring is the cheap perceptual curve: it
+// makes the bottom half of the travel useful instead of "already silent".
+function gainFor(v) {
+  const x = Math.min(1, Math.max(0, Number(v) || 0));
+  return x * x;
+}
+
+const MUSIC_TRIM = 0.8;   // the track is a full mix; it sits under the guns
+const MUSIC_DUCK = 0.5;   // −6.0 dB while the FPV feed is up
+
+function loadMix() {
+  const mix = { ...MIX_DEFAULT };
+  try {
+    const raw = window.localStorage?.getItem(MIX_KEY);
+    if (!raw) return mix;
+    const got = JSON.parse(raw);
+    if (got && typeof got === 'object') {
+      if (Number.isFinite(got.music)) mix.music = Math.min(1, Math.max(0, got.music));
+      if (Number.isFinite(got.sfx)) mix.sfx = Math.min(1, Math.max(0, got.sfx));
+      mix.musicMuted = !!got.musicMuted;
+      mix.sfxMuted = !!got.sfxMuted;
+      mix.muted = !!got.muted;
+    }
+  } catch (_) { /* unreadable storage is not an error, it is a default */ }
+  return mix;
+}
+
+function saveMix(mix) {
+  try { window.localStorage?.setItem(MIX_KEY, JSON.stringify(mix)); }
+  catch (_) { /* quota / private mode — the session still works */ }
+}
+
+// --- movement-sound classification ----------------------------------------
+// Sound follows the CHASSIS, not the weapon: everything that rolls on the same
+// running gear shares a voice, and the fallbacks below mean a unit type this
+// module has never met still gets a sensible engine instead of silence.
+
+const MOVE_CLASS_BY_TYPE = {
+  infantry: 'foot',
+  atgm_team: 'foot',
+  mbt: 'tracked_heavy',
+  ifv: 'tracked_light',
+  apc: 'tracked_light',
+  truck: 'wheeled',
+  ew: 'wheeled',
+  supply: 'wheeled',
+  spg: 'chassis_heavy',
+  mlrs: 'chassis_heavy',
+  aa: 'chassis_heavy',
+  sam: 'chassis_heavy',
+  fpv_drone: 'drone',
+  loiter_munition: 'drone',
+  recon_drone: 'drone',
+  helo: 'rotor',
+};
+
+const MOVE_CLASS_BY_UNITCLASS = {
+  armor: 'tracked_heavy',
+  mech: 'tracked_light',
+  artillery: 'chassis_heavy',
+  aa: 'chassis_heavy',
+  support: 'wheeled',
+  infantry: 'foot',
+  drone: 'drone',
+  air: 'rotor',
+  rotary: 'rotor',
+  helicopter: 'rotor',
+};
+
+function moveClassOf(unit) {
+  const id = String(unit?.typeId ?? unit?.type?.id ?? '').toLowerCase();
+  if (MOVE_CLASS_BY_TYPE[id]) return MOVE_CLASS_BY_TYPE[id];
+  // Name-shaped fallbacks, so a unit added after this file was written still
+  // sounds right. Order matters: 'helo' before the generic air/drone tests.
+  if (/hel[io]|rotor|hind|apache/.test(id)) return 'rotor';
+  if (/drone|uav|loiter|fpv/.test(id)) return 'drone';
+  if (/sam|shorad|missile_bat|aa/.test(id)) return 'chassis_heavy';
+  if (/truck|supply|jammer|ew/.test(id)) return 'wheeled';
+  if (/inf|team|squad|atgm/.test(id)) return 'foot';
+  if (/tank|mbt/.test(id)) return 'tracked_heavy';
+  const cls = String(unit?.type?.class ?? '').toLowerCase();
+  if (MOVE_CLASS_BY_UNITCLASS[cls]) return MOVE_CLASS_BY_UNITCLASS[cls];
+  return 'wheeled';
+}
+
+// Stable per-unit detune so two tanks in a column are not phase-identical.
+// Hash, not Math.random: the same unit always sounds like itself.
+function unitJitter(unit) {
+  const s = String(unit?.id ?? unit?.typeId ?? 'x');
+  let h = 2166136261;
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return ((h >>> 0) % 1000) / 1000; // 0..1
+}
+
+const MAX_MOVE_VOICES = 3;   // a column is a column, not a wall of engines
 
 let _noiseBuf = null;      // 2 s white noise, shared by everything
 let _crackleBuf = null;    // sparse impulse crackle for explosion tails
@@ -64,8 +189,11 @@ function rand(a, b) { return a + Math.random() * (b - a); }
 export const Audio = {
   ctx: null,
   master: null,       // master gain → compressor → destination
-  sfxBus: null,       // per-category buses hang off master
+  sfxBus: null,       // per-category buses hang off sfxGroup
   ambBus: null,
+  sfxGroup: null,     // SFX + ambience level (the "SFX" fader)
+  musicBus: null,     // music level (the "MUSIC" fader)
+  musicDuck: null,    // FPV-dive ducking, independent of the fader
   _comp: null,
   _clipCurve: null,
   _ambience: false,   // desired state (may be set before init)
@@ -73,9 +201,31 @@ export const Audio = {
   _rumbleTimer: 0,
   _last: Object.create(null), // per-name throttle timestamps
 
+  // mixer — read from storage at module load so hud.js can paint the control
+  // with the player's saved choice before any gesture has happened.
+  _mix: loadMix(),
+  _mixListeners: new Set(),
+  _ducked: false,
+
+  // music
+  _musicBuf: null,
+  _musicSrc: null,
+  _musicEl: null,
+  _musicState: 'idle',   // 'idle' | 'loading' | 'playing' | 'failed'
+
+  // movement voices
+  _moveVoices: new Set(),
+
   init() {
     if (this.ctx) {
       if (this.ctx.state === 'suspended') this.ctx.resume().catch(() => {});
+      // main.js arms init() on BOTH the first pointerdown and the first
+      // keydown, so a music start that lost a race with the autoplay policy
+      // gets exactly one more chance. Bounded: two gestures, two attempts.
+      if (this._musicState === 'failed') {
+        this._musicState = 'idle';
+        this._loadMusic();
+      }
       return;
     }
     try {
@@ -96,13 +246,33 @@ export const Audio = {
       this.master.gain.value = 0.8;
       this.master.connect(this._comp);
 
+      // MIXER GRAPH
+      //   sfxBus ┐
+      //          ├→ sfxGroup ─┐
+      //   ambBus ┘            ├→ master → comp → destination
+      //   musicBus → musicDuck┘
+      // sfxBus/ambBus keep their existing meanings (per-effect level and the
+      // ambience fade) so nothing above this line had to change; the player's
+      // SFX fader lives on the new group node underneath them.
+      this.sfxGroup = ctx.createGain();
+      this.sfxGroup.gain.value = 1.0;
+      this.sfxGroup.connect(this.master);
+
       this.sfxBus = ctx.createGain();
       this.sfxBus.gain.value = 1.0;
-      this.sfxBus.connect(this.master);
+      this.sfxBus.connect(this.sfxGroup);
 
       this.ambBus = ctx.createGain();
       this.ambBus.gain.value = 0.0; // faded in by setAmbience
-      this.ambBus.connect(this.master);
+      this.ambBus.connect(this.sfxGroup);
+
+      this.musicDuck = ctx.createGain();
+      this.musicDuck.gain.value = this._ducked ? MUSIC_DUCK : 1.0;
+      this.musicDuck.connect(this.master);
+
+      this.musicBus = ctx.createGain();
+      this.musicBus.gain.value = 0.0001;   // applyMix ramps it to the real level
+      this.musicBus.connect(this.musicDuck);
 
       _noiseBuf = makeNoiseBuffer(ctx);
       _crackleBuf = makeCrackleBuffer(ctx);
@@ -113,7 +283,15 @@ export const Audio = {
         if (ctx.state === 'suspended') ctx.resume().catch(() => {});
       });
 
+      // Apply the persisted mixer BEFORE anything can make a sound, so a
+      // player who muted last session never hears a frame of audio.
+      this._applyMix(0);
+
       if (this._ambience) this._startAmbience();
+
+      // The music bed. Gesture-gated by construction: nothing here runs until
+      // init(), and init() is only ever called from a pointer/key event.
+      this._loadMusic();
 
       // Fallback self-wiring: main.js gestures Audio.init() but (as shipped)
       // never calls wireAudio(Game). window.STEEL.Game is the contracted debug
@@ -433,6 +611,600 @@ export const Audio = {
   },
 
   // -------------------------------------------------------------------------
+  // MIXER — separate music / SFX levels, each mutable, plus a master mute.
+  // Every setter is safe before init(): the value is stored and applied the
+  // moment the context exists.
+  // -------------------------------------------------------------------------
+
+  /** Snapshot of the mixer. Mutating the result does nothing — call setMix. */
+  getMix() { return { ...this._mix }; },
+
+  /**
+   * Patch the mixer. Accepts any subset of
+   *   { music, sfx, musicMuted, sfxMuted, muted }
+   * Persists to localStorage and notifies onMixChange subscribers.
+   */
+  setMix(patch = {}) {
+    const m = this._mix;
+    if (Number.isFinite(patch.music)) m.music = Math.min(1, Math.max(0, patch.music));
+    if (Number.isFinite(patch.sfx)) m.sfx = Math.min(1, Math.max(0, patch.sfx));
+    if (patch.musicMuted !== undefined) m.musicMuted = !!patch.musicMuted;
+    if (patch.sfxMuted !== undefined) m.sfxMuted = !!patch.sfxMuted;
+    if (patch.muted !== undefined) m.muted = !!patch.muted;
+    // Dragging a fader off zero is an unmute request — anything else is a UI
+    // that lies to the player ("I turned it up and it stayed silent").
+    if (Number.isFinite(patch.music) && m.music > 0 && patch.musicMuted === undefined) {
+      m.musicMuted = false;
+    }
+    if (Number.isFinite(patch.sfx) && m.sfx > 0 && patch.sfxMuted === undefined) {
+      m.sfxMuted = false;
+    }
+    saveMix(m);
+    this._applyMix();
+    for (const fn of this._mixListeners) { try { fn(this.getMix()); } catch (_) {} }
+    return this.getMix();
+  },
+
+  /** Master mute toggle — the [K] hotkey and the panel's big switch. */
+  toggleMute() { return this.setMix({ muted: !this._mix.muted }); },
+
+  /** Subscribe to mixer changes. Returns an unsubscribe function. */
+  onMixChange(fn) {
+    if (typeof fn !== 'function') return () => {};
+    this._mixListeners.add(fn);
+    return () => this._mixListeners.delete(fn);
+  },
+
+  _applyMix(ramp = 0.04) {
+    if (!this.ctx) return;
+    const m = this._mix;
+    const t = this._now();
+    const set = (param, value) => {
+      try {
+        param.cancelScheduledValues(t);
+        if (ramp > 0) param.setTargetAtTime(value, t, ramp);
+        else param.setValueAtTime(value, t);
+      } catch (_) { try { param.value = value; } catch (__) {} }
+    };
+    const musicOn = !m.muted && !m.musicMuted;
+    const sfxOn = !m.muted && !m.sfxMuted;
+    set(this.musicBus.gain, musicOn ? gainFor(m.music) * MUSIC_TRIM : 0.0);
+    set(this.sfxGroup.gain, sfxOn ? gainFor(m.sfx) : 0.0);
+  },
+
+  /**
+   * Duck the music while something else needs the stage — the FPV dronecam
+   * dive. −6 dB down fast, back up slowly. Independent of the music fader, so
+   * it can never fight the player's own setting or leave it stuck low.
+   */
+  duckMusic(on) {
+    on = !!on;
+    if (on === this._ducked) return;
+    this._ducked = on;
+    if (!this.musicDuck) return;
+    try {
+      const t = this._now();
+      this.musicDuck.gain.cancelScheduledValues(t);
+      this.musicDuck.gain.setTargetAtTime(on ? MUSIC_DUCK : 1.0, t, on ? 0.07 : 0.22);
+    } catch (_) { /* never fatal */ }
+  },
+
+  // -------------------------------------------------------------------------
+  // MUSIC BED — audio/theme.m4a, looped.
+  // Decoded into an AudioBuffer first (gapless loop), with an <audio> element
+  // as the fallback for browsers that will not decode AAC through WebAudio.
+  // Every failure path ends in silence, never in a throw.
+  // -------------------------------------------------------------------------
+
+  get musicUrl() {
+    // Resolved against THIS module, not the document: the game is served both
+    // from a repo root and from a GitHub Pages sub-path, and a bare relative
+    // URL would break under one of them.
+    try { return new URL('../../audio/theme.m4a', import.meta.url).href; }
+    catch (_) { return 'audio/theme.m4a'; }
+  },
+
+  _loadMusic() {
+    if (!this.ctx) return;
+    if (this._musicState === 'loading' || this._musicState === 'playing') return;
+    if (this._musicState === 'failed') return;
+    if (this._musicBuf) { this._startMusic(); return; }   // already decoded
+    this._musicState = 'loading';
+    const url = this.musicUrl;
+
+    const decode = (arrayBuf) => new Promise((resolve, reject) => {
+      let settled = false;
+      let ret;
+      try {
+        // Safari <14.1 only has the callback form and returns undefined.
+        ret = this.ctx.decodeAudioData(
+          arrayBuf,
+          (buf) => { if (!settled) { settled = true; resolve(buf); } },
+          (err) => { if (!settled) { settled = true; reject(err || new Error('decode failed')); } });
+      } catch (err) { reject(err); return; }
+      if (ret && typeof ret.then === 'function') {
+        ret.then((buf) => { if (!settled) { settled = true; resolve(buf); } },
+          (err) => { if (!settled) { settled = true; reject(err); } });
+      }
+    });
+
+    (async () => {
+      try {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const ab = await res.arrayBuffer();
+        this._musicBuf = await decode(ab);
+        this._musicState = 'idle';
+        this._startMusic();
+      } catch (err) {
+        console.warn('[audio] music buffer path failed, falling back to <audio>:', err);
+        this._musicState = 'idle';
+        this._startMusicElement(url);
+      }
+    })();
+  },
+
+  _startMusic() {
+    if (!this.ctx || !this._musicBuf || this._musicSrc) return;
+    try {
+      const src = this.ctx.createBufferSource();
+      src.buffer = this._musicBuf;
+      src.loop = true;
+      src.connect(this.musicBus);
+      src.start(this._now());
+      this._musicSrc = src;
+      this._musicState = 'playing';
+    } catch (err) {
+      console.warn('[audio] music start failed:', err);
+      this._musicState = 'failed';
+    }
+  },
+
+  _startMusicElement(url) {
+    try {
+      const el = document.createElement('audio');
+      el.src = url;
+      el.loop = true;
+      el.preload = 'auto';
+      el.addEventListener('error', () => {
+        console.warn('[audio] music file unavailable — running silent');
+        this._musicState = 'failed';
+      });
+      const node = this.ctx.createMediaElementSource(el);
+      node.connect(this.musicBus);
+      this._musicEl = el;
+      this._musicState = 'playing';
+      const p = el.play();
+      if (p && typeof p.catch === 'function') {
+        p.catch((err) => {
+          // Autoplay policy said no despite the gesture, or the file is not
+          // decodable here. Mark it failed so a later gesture can retry, and
+          // leave the rest of the game exactly as it was: silent, not broken.
+          console.warn('[audio] music playback blocked:', err);
+          this._musicState = 'failed';
+        });
+      }
+    } catch (err) {
+      console.warn('[audio] music unavailable — running silent:', err);
+      this._musicState = 'failed';
+    }
+  },
+
+  // -------------------------------------------------------------------------
+  // MOVEMENT VOICES — one looping, positional sound per moving unit, keyed on
+  // chassis class. Starts when the unit starts moving, stops when it arrives.
+  // -------------------------------------------------------------------------
+
+  // Repeating pulse scheduler: `fire(t)` is called with WebAudio timestamps a
+  // quarter-second ahead of the clock, so the rhythm is sample-accurate even
+  // when the main thread is busy drawing hexes. Returns a cancel function.
+  _pulseTrain(fire, intervalFn) {
+    const ctx = this.ctx;
+    let next = ctx.currentTime + 0.01;
+    let stopped = false;
+    const tick = () => {
+      if (stopped || !this.ctx) return;
+      const horizon = this.ctx.currentTime + 0.3;
+      let guard = 0;
+      while (next < horizon && guard++ < 32) {
+        try { fire(next, guard); } catch (_) { /* one bad pulse is not fatal */ }
+        next += Math.max(0.02, intervalFn());
+      }
+    };
+    tick();
+    const id = setInterval(tick, 100);
+    return () => { stopped = true; clearInterval(id); };
+  },
+
+  // A continuous looped-noise bed. Returns the source so the voice can stop it.
+  _noiseBed(out, o = {}) {
+    const ctx = this.ctx;
+    const src = ctx.createBufferSource();
+    src.buffer = _noiseBuf;
+    src.loop = true;
+    src.playbackRate.value = o.rate ?? 1;
+    const filt = ctx.createBiquadFilter();
+    filt.type = o.type ?? 'lowpass';
+    filt.frequency.value = o.freq ?? 300;
+    filt.Q.value = o.Q ?? 0.6;
+    const g = ctx.createGain();
+    g.gain.value = o.gain ?? 0.05;
+    src.connect(filt); filt.connect(g); g.connect(out);
+    src.start(this._now(), rand(0, 1.5));
+    return { src, g, filt };
+  },
+
+  /**
+   * Start a movement voice for `unit`. Returns a handle with `.stop()`, or
+   * null (no context, muted-out, over the voice cap, or the unit is not on
+   * screen — you do not hear an enemy you cannot see).
+   */
+  startMoveVoice(unit) {
+    if (!this.ctx || this.ctx.state === 'closed') return null;
+    if (this._moveVoices.size >= MAX_MOVE_VOICES) return null;
+    // Fog: fog.js drives `mesh.visible` for RED units. An unseen column moves
+    // silently, which is also why the instant (perHex = 0) walk never blips.
+    const mesh = unit?.mesh || null;
+    if (mesh && mesh.visible === false) return null;
+
+    const ctx = this.ctx;
+    let voice = null;
+    // Declared out here so a failure half-way through the build can still tear
+    // down whatever it already started — a stranded oscillator is inaudible
+    // but it is a leak, and it never stops.
+    const nodes = [];   // oscillators / buffer sources to stop on teardown
+    const timers = [];  // pulse-train cancels
+    try {
+      const cls = moveClassOf(unit);
+      const jit = unitJitter(unit);
+
+      // envelope → distance/trim → pan → sfxBus
+      const envG = ctx.createGain();
+      envG.gain.value = 0.0001;
+      const distG = ctx.createGain();
+      distG.gain.value = 1;
+      envG.connect(distG);
+      let panner = null;
+      if (typeof ctx.createStereoPanner === 'function') {
+        panner = ctx.createStereoPanner();
+        distG.connect(panner);
+        panner.connect(this.sfxBus);
+      } else {
+        distG.connect(this.sfxBus);
+      }
+
+      const built = this._buildMoveVoice(cls, envG, jit, nodes, timers);
+      const trim = built.trim;
+
+      const t0 = this._now();
+      envG.gain.setValueAtTime(0.0001, t0);
+      envG.gain.exponentialRampToValueAtTime(1, t0 + (built.attack ?? 0.16));
+
+      voice = {
+        cls, unit, trim, envG, distG, panner, nodes, timers,
+        posTimer: 0, stopped: false,
+        stop: () => this._stopMoveVoice(voice),
+      };
+
+      // Positional update: pan from the camera's right axis, gain from range.
+      const follow = () => this._placeVoice(voice);
+      follow();
+      voice.posTimer = setInterval(follow, 140);
+
+      this._moveVoices.add(voice);
+      return voice;
+    } catch (err) {
+      console.warn('[audio] move voice failed:', err);
+      if (voice) {
+        try { this._stopMoveVoice(voice); } catch (_) {}
+      } else {
+        for (const cancel of timers) { try { cancel(); } catch (_) {} }
+        for (const n of nodes) { try { n.stop(); } catch (_) {} }
+      }
+      return null;
+    }
+  },
+
+  stopMoveVoice(voice) { this._stopMoveVoice(voice); },
+
+  _stopMoveVoice(voice) {
+    if (!voice || voice.stopped) return;
+    voice.stopped = true;
+    this._moveVoices.delete(voice);
+    clearInterval(voice.posTimer);
+    for (const cancel of voice.timers) { try { cancel(); } catch (_) {} }
+    if (!this.ctx) return;
+    try {
+      const t = this.ctx.currentTime;
+      const g = voice.envG.gain;
+      g.cancelScheduledValues(t);
+      g.setValueAtTime(Math.max(0.0001, g.value || 0.0001), t);
+      g.exponentialRampToValueAtTime(0.0001, t + 0.20);
+      for (const n of voice.nodes) { try { n.stop(t + 0.28); } catch (_) {} }
+    } catch (_) { /* already gone */ }
+  },
+
+  /** Stop everything that is currently rolling (turn change, game over). */
+  stopAllMoveVoices() {
+    for (const v of [...this._moveVoices]) this._stopMoveVoice(v);
+  },
+
+  // Pan + distance attenuation from the live camera. No three.js import: the
+  // camera's inverse world matrix is read straight off `.elements`.
+  _placeVoice(voice) {
+    if (!voice || voice.stopped || !this.ctx) return;
+    const mesh = voice.unit?.mesh;
+    let pan = 0;
+    let att = 1;
+    try {
+      if (mesh && mesh.visible === false) {
+        // walked into the fog mid-move: fade out rather than cut
+        att = 0.0;
+      } else if (mesh) {
+        const cam = (typeof window !== 'undefined' && window.STEEL?.engine?.camera) || null;
+        const p = mesh.position;
+        if (cam && cam.matrixWorldInverse) {
+          const e = cam.matrixWorldInverse.elements;
+          const cx = e[0] * p.x + e[4] * p.y + e[8] * p.z + e[12];
+          const cy = e[1] * p.x + e[5] * p.y + e[9] * p.z + e[13];
+          const cz = e[2] * p.x + e[6] * p.y + e[10] * p.z + e[14];
+          const depth = Math.max(8, Math.abs(cz));
+          pan = Math.max(-0.85, Math.min(0.85, (cx / depth) * 1.15));
+          const d = Math.sqrt(cx * cx + cy * cy + cz * cz);
+          // gentle roll-off: a unit at the far edge of an RTS-zoom frame is
+          // audible but clearly distant; nothing ever drops to true silence.
+          att = 0.28 + 0.72 / (1 + (d / 150) * (d / 150));
+        }
+      }
+    } catch (_) { /* camera not ready — centre, full level */ }
+    try {
+      const t = this.ctx.currentTime;
+      voice.distG.gain.setTargetAtTime(voice.trim * att, t, 0.09);
+      if (voice.panner) voice.panner.pan.setTargetAtTime(pan, t, 0.09);
+    } catch (_) {}
+  },
+
+  // The synth definitions. Each returns { trim, attack } and pushes its
+  // stoppable nodes / pulse trains onto the arrays it is handed.
+  _buildMoveVoice(cls, out, jit, nodes, timers) {
+    const ctx = this.ctx;
+    const t0 = this._now();
+
+    // helper: a continuous oscillator into `dest`
+    const osc = (type, freq, gain, dest, detune = 0) => {
+      const o = ctx.createOscillator();
+      o.type = type;
+      o.frequency.value = freq;
+      o.detune.value = detune;
+      const g = ctx.createGain();
+      g.gain.value = gain;
+      o.connect(g); g.connect(dest);
+      o.start(t0);
+      nodes.push(o);
+      return { osc: o, g };
+    };
+    // helper: an LFO writing into an AudioParam
+    const lfo = (freq, depth, param) => {
+      const o = ctx.createOscillator();
+      o.frequency.value = freq;
+      const g = ctx.createGain();
+      g.gain.value = depth;
+      o.connect(g); g.connect(param);
+      o.start(t0);
+      nodes.push(o);
+      return o;
+    };
+
+    switch (cls) {
+
+      // --- boots on the ground ------------------------------------------
+      // Footfall (soft low thud) + kit rattle (webbing, magazines, a rifle
+      // sling against a plate carrier). Alternating feet, human irregularity.
+      case 'foot': {
+        let step = 0;
+        timers.push(this._pulseTrain((t) => {
+          const strong = (step++ % 2) === 0;
+          const amp = strong ? 0.16 : 0.125;
+          this._noise({
+            when: t, dur: 0.055, type: 'lowpass',
+            freq: strong ? 300 : 265, gain: amp, attack: 0.004, out,
+          });
+          this._noise({
+            when: t + 0.018, dur: 0.06, type: 'bandpass',
+            freq: rand(2800, 3600), Q: 2.4, gain: 0.045, attack: 0.005, out,
+          });
+        }, () => 0.255 * rand(0.9, 1.12)));
+        return { trim: 0.85, attack: 0.06 };
+      }
+
+      // --- MBT: deep diesel + track clatter -------------------------------
+      case 'tracked_heavy': {
+        const lp = ctx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.value = 230;
+        lp.Q.value = 0.9;
+        const chug = ctx.createGain();
+        chug.gain.value = 0.55;             // firing-order pulse rides on this
+        lp.connect(chug); chug.connect(out);
+        const f = 32 + jit * 3;
+        osc('sawtooth', f, 0.5, lp);
+        osc('sawtooth', f * 2.01, 0.22, lp, -7);
+        osc('sine', f * 0.5, 0.30, lp);      // the sub you feel, not hear
+        lfo(10.4 + jit * 0.8, 0.4, chug.gain);
+        const bed = this._noiseBed(out, { type: 'lowpass', freq: 135, gain: 0.075 });
+        nodes.push(bed.src);
+        timers.push(this._pulseTrain((t) => {
+          this._noise({
+            when: t, dur: 0.038, type: 'bandpass',
+            freq: rand(1900, 3000), Q: 5.5, gain: rand(0.022, 0.05),
+            attack: 0.001, out,
+          });
+        }, () => 0.068 * rand(0.85, 1.15)));
+        return { trim: 0.92, attack: 0.22 };
+      }
+
+      // --- IFV / APC: the same running gear, lighter and busier -----------
+      case 'tracked_light': {
+        const lp = ctx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.value = 420;
+        lp.Q.value = 0.8;
+        const chug = ctx.createGain();
+        chug.gain.value = 0.6;
+        lp.connect(chug); chug.connect(out);
+        const f = 52 + jit * 5;
+        osc('sawtooth', f, 0.4, lp);
+        osc('sawtooth', f * 2, 0.16, lp, 9);
+        lfo(14 + jit, 0.3, chug.gain);
+        const bed = this._noiseBed(out, { type: 'lowpass', freq: 260, gain: 0.045 });
+        nodes.push(bed.src);
+        timers.push(this._pulseTrain((t) => {
+          this._noise({
+            when: t, dur: 0.028, type: 'bandpass',
+            freq: rand(3000, 4400), Q: 6, gain: rand(0.014, 0.032),
+            attack: 0.001, out,
+          });
+        }, () => 0.052 * rand(0.85, 1.15)));
+        return { trim: 0.72, attack: 0.18 };
+      }
+
+      // --- truck / jammer / supply: a road vehicle, not a tracked one -----
+      // No clatter at all — that is the whole tell. Tyre roar plus a lazy rev
+      // wobble reads as "engine hum" the way the owner described it.
+      case 'wheeled': {
+        const lp = ctx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.value = 780;
+        lp.Q.value = 1.1;
+        lp.connect(out);
+        const f = 88 + jit * 12;
+        const base = osc('sawtooth', f, 0.30, lp);
+        osc('sawtooth', f * 2, 0.10, lp, 6);
+        osc('square', f * 0.5, 0.10, lp);
+        lfo(0.33, 11, base.osc.frequency);   // gear-change wander
+        lfo(7.5, 4, base.osc.frequency);     // idle roughness
+        const bed = this._noiseBed(out, { type: 'bandpass', freq: 720, Q: 0.55, gain: 0.055 });
+        nodes.push(bed.src);
+        return { trim: 0.66, attack: 0.20 };
+      }
+
+      // --- SPG / MLRS / SHORAD / SAM: heavy chassis, hydraulics -----------
+      // Deliberately NOT the MBT voice: less sub, slower clatter, and a
+      // turret/erector hydraulic whine on top that the tank does not have.
+      case 'chassis_heavy': {
+        const lp = ctx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.value = 320;
+        lp.Q.value = 0.8;
+        const chug = ctx.createGain();
+        chug.gain.value = 0.6;
+        lp.connect(chug); chug.connect(out);
+        const f = 44 + jit * 4;
+        osc('sawtooth', f, 0.42, lp);
+        osc('square', f * 2, 0.14, lp, -5);
+        lfo(8 + jit * 0.6, 0.28, chug.gain);
+        const bed = this._noiseBed(out, { type: 'lowpass', freq: 190, gain: 0.05 });
+        nodes.push(bed.src);
+        // hydraulic / gearbox whine
+        const wl = ctx.createBiquadFilter();
+        wl.type = 'bandpass';
+        wl.frequency.value = 470;
+        wl.Q.value = 3.2;
+        wl.connect(out);
+        const whine = osc('triangle', 430 + jit * 40, 0.055, wl);
+        lfo(0.7, 9, whine.osc.frequency);
+        timers.push(this._pulseTrain((t) => {
+          this._noise({
+            when: t, dur: 0.05, type: 'bandpass',
+            freq: rand(1150, 1750), Q: 4, gain: rand(0.02, 0.042),
+            attack: 0.002, out,
+          });
+        }, () => 0.098 * rand(0.85, 1.15)));
+        return { trim: 0.80, attack: 0.22 };
+      }
+
+      // --- quadcopters -----------------------------------------------------
+      case 'drone': {
+        const lp = ctx.createBiquadFilter();
+        lp.type = 'lowpass';
+        lp.frequency.value = 2400;
+        lp.Q.value = 0.7;
+        const flut = ctx.createGain();
+        flut.gain.value = 0.8;
+        lp.connect(flut); flut.connect(out);
+        const f = 166 + jit * 12;
+        osc('sawtooth', f, 0.10, lp);
+        osc('sawtooth', f * 1.02, 0.10, lp, 8);
+        osc('square', f * 2, 0.04, lp, -4);
+        lfo(12.5 + jit * 2, 0.22, flut.gain);
+        return { trim: 0.55, attack: 0.14 };
+      }
+
+      // --- HELICOPTER: the most distinctive sound in the game --------------
+      // Three layers, all locked to one blade-passage rate:
+      //   1. blade slap  — the low WHOP-whop the airframe is known by
+      //   2. rotor wash  — broadband noise amplitude-modulated at the same rate
+      //   3. turbine     — a steady high whine, plus a tail-rotor buzz
+      case 'rotor': {
+        const BLADE = 0.108 + jit * 0.006;   // ≈ 9 Hz blade passage
+        let beat = 0;
+        timers.push(this._pulseTrain((t) => {
+          // every fourth blade lands harder — that is the "whop-whop-WHOP"
+          const emph = (beat++ % 4) === 0 ? 1.45 : ((beat % 2) === 0 ? 1.0 : 0.82);
+          this._noise({
+            when: t, dur: 0.085, type: 'lowpass',
+            freq: 165, gain: 0.30 * emph, attack: 0.007, out,
+          });
+          this._tone({
+            when: t, type: 'sine', freq: 98, freqEnd: 48,
+            dur: 0.10, gain: 0.24 * emph, attack: 0.005, out,
+          });
+          this._noise({
+            when: t + 0.012, dur: 0.05, type: 'bandpass',
+            freq: 900, Q: 1.1, gain: 0.05 * emph, attack: 0.004, out,
+          });
+        }, () => BLADE));
+
+        // rotor wash, chopped at the blade rate so it breathes with the slap
+        const washG = ctx.createGain();
+        washG.gain.value = 0.55;
+        washG.connect(out);
+        const wash = this._noiseBed(washG, { type: 'bandpass', freq: 1050, Q: 0.5, gain: 0.085 });
+        nodes.push(wash.src);
+        lfo(1 / BLADE, 0.42, washG.gain);
+
+        // turbine — steady, bright, sits above the whole mix
+        const tb = ctx.createBiquadFilter();
+        tb.type = 'bandpass';
+        tb.frequency.value = 1500;
+        tb.Q.value = 1.3;
+        tb.connect(out);
+        const turb = osc('sawtooth', 605 + jit * 30, 0.055, tb);
+        osc('sawtooth', 1215 + jit * 60, 0.028, tb, 6);
+        lfo(0.28, 7, turb.osc.frequency);
+
+        // tail rotor — a fast dry buzz well above the main blade rate
+        const tl = ctx.createBiquadFilter();
+        tl.type = 'lowpass';
+        tl.frequency.value = 520;
+        const tailG = ctx.createGain();
+        tailG.gain.value = 0.5;
+        tl.connect(tailG); tailG.connect(out);
+        osc('sawtooth', 92 + jit * 6, 0.09, tl);
+        lfo(23, 0.35, tailG.gain);
+
+        // Short attack on purpose: state.js flies air units at 240 ms/hex
+        // (FLY_MS_PER_HEX), so a one-hex hop is over before a 300 ms spool-up
+        // would have reached full level.
+        return { trim: 0.95, attack: 0.16 };
+      }
+
+      default:
+        return this._buildMoveVoice('wheeled', out, jit, nodes, timers);
+    }
+  },
+
+  // -------------------------------------------------------------------------
   // public API
   // -------------------------------------------------------------------------
 
@@ -600,6 +1372,7 @@ export const Audio = {
 // ---------------------------------------------------------------------------
 
 let _wired = false;
+let _moveHooked = false;   // true once the start-of-move hook is installed
 
 const VEHICLE_CLASSES = new Set(['mbt', 'ifv', 'apc', 'spg', 'mlrs', 'aa', 'ew', 'truck']);
 
@@ -608,14 +1381,64 @@ function attackerType(payload) {
       ?? payload?.unit?.typeId ?? payload?.typeId ?? null;
 }
 
+/**
+ * START-OF-MOVE HOOK.
+ *
+ * state.js emits `unitMoved` only AFTER the walk completes (state.js:580), and
+ * publishes no start event — so a movement sound driven off the event bus plays
+ * once the vehicle has already parked. A looping engine needs both edges.
+ *
+ * `Game.moveUnit` gives both, precisely, without touching state.js:
+ *   · it sets `this._moving = true` SYNCHRONOUSLY, after the order has been
+ *     validated and the path resolved, and before the first `await tween` —
+ *     so "did this call flip _moving?" is an exact, refusal-proof start signal;
+ *   · the promise it returns resolves when the last hex is walked — the exact
+ *     end signal, for refusals, aborts and completed moves alike.
+ *
+ * The preferred long-term contract is written up in INTEGRATION_NOTES.md
+ * ("audio: start-of-move event"): a `unitMoveStarted` emit alongside the
+ * `this._moving = true` line would let this wrapper be deleted. Until then the
+ * wrapper is deliberately transparent — same `this`, same arguments, same
+ * returned promise — and it never swallows an error.
+ */
+function installMoveHook(Game) {
+  if (_moveHooked) return;
+  if (typeof Game?.moveUnit !== 'function') return;
+  const orig = Game.moveUnit;
+  Game.moveUnit = function patchedMoveUnit(unit, order) {
+    const wasMoving = !!this._moving;
+    const p = orig.apply(this, arguments);   // a throw is state.js's business
+    // The flag flipped on THIS call ⇒ the order was accepted and the walk is
+    // under way. Anything else (refused order, a move already in flight) makes
+    // no sound at all.
+    let voice = null;
+    if (!wasMoving && this._moving) {
+      try { voice = Audio.startMoveVoice(unit); } catch (_) { voice = null; }
+    }
+    if (voice) {
+      const end = () => { try { Audio.stopMoveVoice(voice); } catch (_) {} };
+      if (p && typeof p.then === 'function') p.then(end, end);
+      else end();
+    }
+    return p;
+  };
+  _moveHooked = true;
+}
+
 export function wireAudio(Game) {
   if (_wired || !Game?.on) return;
   _wired = true;
+
+  installMoveHook(Game);
 
   Game.on('select', () => Audio.sfx('select'));
   Game.on('deselect', () => Audio.sfx('deselect'));
 
   Game.on('unitMoved', (unit) => {
+    // With the start-of-move hook installed the looping voice has already
+    // covered the whole walk — firing a one-shot here would double the sound
+    // on arrival. This branch is the fallback for a Game without moveUnit.
+    if (_moveHooked) return;
     const t = unit?.typeId ?? unit?.unit?.typeId;
     if (t === 'infantry' || t === 'atgm_team') Audio.sfx('footsteps');
     else if (t === 'recon_drone' || t === 'fpv_drone' || t === 'loiter_munition') Audio.sfx('recon_buzz');
@@ -654,6 +1477,18 @@ export function wireAudio(Game) {
         Audio.sfx('recon_buzz', { dur: 1.2 });
         setTimeout(() => Audio.sfx('explosion_big'), 900);
         break;
+      // OWNER-FEEDBACK ROUND — the two new air-war units. Additive: if the
+      // units module names them differently these fall through to the default
+      // and the game still makes a sound.
+      case 'helo':
+        Audio.sfx('mg', { shots: 12, rate: 0.045 });   // chin gun burst
+        setTimeout(() => Audio.sfx('missile'), 160);   // rocket pod
+        setTimeout(() => Audio.sfx('explosion', { size: 0.9 }), 820);
+        break;
+      case 'sam':
+        Audio.sfx('missile');
+        setTimeout(() => Audio.sfx('explosion', { size: 0.8 }), 950);
+        break;
       default:
         Audio.sfx('mg'); break;
     }
@@ -680,7 +1515,12 @@ export function wireAudio(Game) {
 
   Game.on('resourcesChanged', () => Audio.sfx('ui_tick', { freq: 2600, gain: 0.05 }));
 
+  // A unit destroyed mid-walk never resolves a normal arrival, and a finished
+  // phase must not leave an engine idling under the next one.
+  Game.on('turnEnded', () => Audio.stopAllMoveVoices());
+
   Game.on('gameOver', (result) => {
+    Audio.stopAllMoveVoices();
     Audio.setAmbience(false);
     const won = result?.victory ?? result?.won
       ?? (typeof result === 'string' && result.includes('vict'));

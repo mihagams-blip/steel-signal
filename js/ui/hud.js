@@ -25,7 +25,13 @@ import {
 // whichever side is acting, so during the RED phase it would fog the player's
 // own map from the enemy's point of view.
 import { isVisible, visibleHexes } from '../game/fog.js';
-import { fpvStrike, loiterStrike, artilleryBarrage } from '../game/combat.js';
+import {
+  fpvStrike, loiterStrike, artilleryBarrage, isAirUnit, canEngageAir,
+} from '../game/combat.js';
+// The mixer panel (music / SFX levels, master mute, [K]) is HUD chrome; the
+// gain graph, the localStorage record and the FPV duck all live in audio.js.
+// Every call below is safe before the audio context exists.
+import { Audio } from '../audio/audio.js';
 
 /* ---------------------------------------------------------------- lookups */
 
@@ -98,14 +104,21 @@ const INFRA_NAMES = {
 // row shows the field abbreviation and carries the full name in its tooltip.
 const SHORT_NAMES = {
   mbt: 'MBT', ifv: 'IFV', apc: 'APC', spg: 'SP HOWITZER', mlrs: 'MLRS',
-  aa: 'SHORAD', ew: 'EW JAMMER', infantry: 'INFANTRY', atgm_team: 'ATGM TEAM',
+  aa: 'SHORAD AD', ew: 'EW JAMMER', infantry: 'INFANTRY', atgm_team: 'ATGM TEAM',
   truck: 'SUPPLY', fpv_drone: 'FPV TEAM', recon_drone: 'RECON UAV',
   loiter_munition: 'LOITER BTY',
+  // AUDIO/AIR ROUND. "SHORAD" alone did not read as anti-air to the owner, so
+  // the rail abbreviation now carries "AD" too and the two air-defence types
+  // sort together under one family.
+  helo: 'ATTACK HELO', sam: 'SAM BATTERY',
 };
 
 // Order of battle sorts by combined-arms family, the way a real ORBAT is read.
+// `air` sits directly after `aa` so the gunship and the batteries that answer it
+// are read as one air problem, above the drones.
 const CLASS_ORDER = {
-  armor: 0, mech: 1, infantry: 2, artillery: 3, aa: 4, drone: 5, support: 6,
+  armor: 0, mech: 1, infantry: 2, artillery: 3, aa: 4, air: 5, drone: 6,
+  support: 7,
 };
 
 /* ------------------------------------------------------- minimap palette */
@@ -174,6 +187,12 @@ const GLYPH = {
   fpv_drone: 'drone_strike',
   recon_drone: 'recon',
   loiter_munition: 'drone_loiter',
+  // AUDIO/AIR ROUND. Without these two the fallback drew `type.icon`, which
+  // gave the SAM the SHORAD's identical arc — two different air-defence units
+  // sharing one counter symbol, in the round whose whole point was that the
+  // player could not tell which unit was the anti-air one.
+  helo: 'helo',
+  sam: 'aa_long',
 };
 
 // APP-6-ish glyph: friendly rounded rect / hostile diamond, class symbol inside.
@@ -225,6 +244,15 @@ function glyphSVG(icon, faction, typeId) {
       break;
     case 'aa':
       sym = `<path d="M ${cx - hw} ${cy + hh} Q ${cx} ${cy - hh - 3} ${cx + hw} ${cy + hh}" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>`;
+      break;
+    case 'aa_long':                           // AA arc + range bar = area defence
+      sym = `<path d="M ${cx - hw} ${cy + hh} Q ${cx} ${cy - hh - 3} ${cx + hw} ${cy + hh}" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>` +
+        L(cx - hw * 0.72, cy + hh * 0.92, cx + hw * 0.72, cy + hh * 0.92, 1.8);
+      break;
+    case 'helo':                              // rotor bar over a fuselage oval
+      sym = L(cx - hw, cy - hh * 0.72, cx + hw, cy - hh * 0.72, 2.2) +
+        `<ellipse cx="${cx}" cy="${cy + hh * 0.30}" rx="${hw * 0.62}" ry="${hh * 0.52}" fill="none" stroke="currentColor" stroke-width="2.2"/>` +
+        L(cx, cy - hh * 0.72, cx, cy - hh * 0.18, 1.8);
       break;
     case 'ew':
       sym = `<polyline points="${cx - hw},${cy + 2} ${cx - hw / 2},${cy - hh * 0.8} ${cx},${cy + 2} ${cx + hw / 2},${cy - hh * 0.8} ${cx + hw},${cy + 2}" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linejoin="round"/>`;
@@ -464,6 +492,32 @@ export function initHUD(Game, deps = {}) {
     </div>
 
     <div id="ss-toasts" role="status" aria-live="polite" aria-atomic="false"></div>
+
+    <div id="ss-mixer" class="ss-panel" role="group" aria-label="Audio mixer">
+      <div class="mx-head">
+        <span class="ss-head">Audio</span>
+        <button class="mx-master" id="mx-master" type="button" aria-pressed="false"
+                aria-label="Mute all audio (K)" title="Mute all audio [K]">
+          <span class="mx-led" aria-hidden="true"></span><span class="mx-lbl">Mute</span>
+        </button>
+      </div>
+      <div class="mx-row">
+        <button class="mx-ch" id="mx-music-mute" type="button" aria-pressed="false"
+                aria-label="Mute music" title="Mute music"><i aria-hidden="true">♪</i></button>
+        <span class="mx-k">Mus</span>
+        <input class="mx-slider" id="mx-music" type="range" min="0" max="100" step="1"
+               value="55" aria-label="Music volume">
+        <span class="mx-v" id="mx-music-v">55</span>
+      </div>
+      <div class="mx-row">
+        <button class="mx-ch" id="mx-sfx-mute" type="button" aria-pressed="false"
+                aria-label="Mute sound effects" title="Mute sound effects"><i aria-hidden="true">⌁</i></button>
+        <span class="mx-k">Sfx</span>
+        <input class="mx-slider" id="mx-sfx" type="range" min="0" max="100" step="1"
+               value="100" aria-label="Sound effects volume">
+        <span class="mx-v" id="mx-sfx-v">100</span>
+      </div>
+    </div>
 
     <div id="ss-oob" class="ss-panel">
       <div class="oob-head">
@@ -906,7 +960,10 @@ export function initHUD(Game, deps = {}) {
       case 'loiter':
         return sel.typeId === 'loiter_munition' && !sel.fired && sel.ammo > 0;
       case 'entrench':
-        return !sel.moved && !sel.fired &&
+        // Nothing airborne digs in (§2) — state.js refuses it, so the button
+        // must not offer it either. `isAirUnit` covers the helicopter, whose
+        // class is 'air' and which the typeId list below would have missed.
+        return !sel.moved && !sel.fired && !isAirUnit(sel) &&
           !['fpv_drone', 'recon_drone', 'loiter_munition'].includes(sel.typeId);
       default:
         return false;
@@ -1191,9 +1248,11 @@ export function initHUD(Game, deps = {}) {
           noteDenied('NO LINE OF SIGHT — NOT SPOTTED',
             `${selName}: no line of sight — nothing is spotted on that hex.`);
         } else if (mode === 'attack' && u) {
-          noteDenied(u.typeId === 'recon_drone'
-            ? 'ONLY SHORAD CAN ENGAGE AIR' : 'NO WEAPON EFFECT VS TARGET',
-            `${selName} cannot engage that target class.`);
+          noteDenied(isAirUnit(u)
+            ? 'ONLY AIR DEFENCE CAN ENGAGE AIR' : 'NO WEAPON EFFECT VS TARGET',
+            isAirUnit(u) && !canEngageAir(sel)
+              ? `${selName} cannot shoot at aircraft — bring SHORAD or the SAM battery.`
+              : `${selName} cannot engage that target class.`);
         } else if (mode === 'attack') {
           noteDenied('NO TARGET — NEEDS A SPOTTED ENEMY',
             `${selName}: direct fire needs a spotted enemy unit on the hex.`);
@@ -1206,9 +1265,11 @@ export function initHUD(Game, deps = {}) {
         if (t) { orderAttack(t); return; }
         // In-envelope hex with no engageable target (ITEM 4): explain.
         if (u && u.faction !== 'blue') {
-          noteDenied(u.typeId === 'recon_drone'
-            ? 'ONLY SHORAD CAN ENGAGE AIR' : 'NO WEAPON EFFECT VS TARGET',
-            `${selName} cannot engage that target class.`);
+          noteDenied(isAirUnit(u)
+            ? 'ONLY AIR DEFENCE CAN ENGAGE AIR' : 'NO WEAPON EFFECT VS TARGET',
+            isAirUnit(u) && !canEngageAir(sel)
+              ? `${selName} cannot shoot at aircraft — bring SHORAD or the SAM battery.`
+              : `${selName} cannot engage that target class.`);
         } else {
           noteDenied('NO TARGET — NEEDS A SPOTTED ENEMY',
             `${selName}: direct fire needs a spotted enemy unit on the hex.`);
@@ -1360,6 +1421,10 @@ export function initHUD(Game, deps = {}) {
     document.body.classList.toggle('fpv-active', on);
     syncInert();
     if (on) hideTooltip();
+    // The dive is the one moment the game asks for the player's whole
+    // attention, so the music steps back 6 dB and comes back after. This is
+    // separate from the player's own music fader and never overwrites it.
+    try { Audio.duckMusic(on); } catch (err) { /* audio is never fatal */ }
   }
 
   (function watchFpvOverlay() {
@@ -1381,6 +1446,127 @@ export function initHUD(Game, deps = {}) {
     } catch (e) { /* observation is a nicety, never fatal */ }
     read();
   }());
+
+  /* ---- audio mixer ------------------------------------------------------- */
+  // Two independent faders, because "turn the music down" and "turn the guns
+  // down" are different requests: conflating them would mean the only way to
+  // silence the soundtrack is to silence the game. Each channel has its own
+  // mute; [K] is the master kill. audio.js owns the levels and persists them
+  // to localStorage, so a reload comes back exactly as the player left it.
+
+  const elMixerPanel = $('#ss-mixer');
+  const elMxMaster = $('#mx-master');
+  const elMxMusic = $('#mx-music');
+  const elMxSfx = $('#mx-sfx');
+  const elMxMusicMute = $('#mx-music-mute');
+  const elMxSfxMute = $('#mx-sfx-mute');
+  const elMxMusicV = $('#mx-music-v');
+  const elMxSfxV = $('#mx-sfx-v');
+
+  // While the player is dragging a fader, the readout must follow the pointer
+  // and not the round-trip through audio.js — otherwise the number stutters.
+  let mxDragging = null;
+
+  function paintMixer(mix) {
+    if (!mix) return;
+    const master = !!mix.muted;
+    const rows = [
+      [elMxMusic, elMxMusicV, elMxMusicMute, mix.music, mix.musicMuted],
+      [elMxSfx, elMxSfxV, elMxSfxMute, mix.sfx, mix.sfxMuted],
+    ];
+    for (const [slider, out, btn, value, chMuted] of rows) {
+      if (!slider) continue;
+      const pct = Math.round(Math.min(1, Math.max(0, value)) * 100);
+      if (slider !== mxDragging) slider.value = String(pct);
+      // the amber fill is drawn by the track gradient in css/ui.css
+      slider.style.setProperty('--mx-fill', `${pct}%`);
+      // A master-muted rack still takes adjustments — the player sets the
+      // level they want and then unmutes. Nothing here is ever `disabled`;
+      // the channels only *look* dead.
+      const off = master || chMuted;
+      slider.classList.toggle('off', off);
+      if (out) {
+        out.textContent = off ? '––' : String(pct);
+        out.classList.toggle('off', off);
+      }
+      if (btn) {
+        btn.setAttribute('aria-pressed', chMuted ? 'true' : 'false');
+        btn.classList.toggle('off', chMuted);
+      }
+    }
+    if (elMxMaster) {
+      elMxMaster.setAttribute('aria-pressed', master ? 'true' : 'false');
+      elMxMaster.classList.toggle('off', master);
+      const lbl = elMxMaster.querySelector('.mx-lbl');
+      if (lbl) lbl.textContent = master ? 'Muted' : 'Mute';
+      elMxMaster.setAttribute('aria-label',
+        master ? 'Unmute all audio (K)' : 'Mute all audio (K)');
+      elMxMaster.title = master ? 'Unmute all audio [K]' : 'Mute all audio [K]';
+    }
+    if (elMixerPanel) elMixerPanel.classList.toggle('all-muted', master);
+  }
+
+  function readMix() {
+    try { return Audio.getMix(); } catch (err) { return null; }
+  }
+  function pushMix(patch) {
+    try { return Audio.setMix(patch); } catch (err) { return readMix(); }
+  }
+
+  if (elMxMusic) {
+    const onSlide = (e) => {
+      mxDragging = e.currentTarget;
+      const v = Number(e.currentTarget.value) / 100;
+      const ch = e.currentTarget === elMxSfx ? 'sfx' : 'music';
+      e.currentTarget.style.setProperty('--mx-fill', `${e.currentTarget.value}%`);
+      const out = ch === 'sfx' ? elMxSfxV : elMxMusicV;
+      if (out) { out.textContent = e.currentTarget.value; out.classList.remove('off'); }
+      paintMixer(pushMix({ [ch]: v }));
+    };
+    const endSlide = () => { mxDragging = null; };
+    for (const el of [elMxMusic, elMxSfx]) {
+      if (!el) continue;
+      el.addEventListener('input', onSlide);
+      el.addEventListener('change', (e) => { onSlide(e); endSlide(); });
+      el.addEventListener('pointerup', endSlide);
+      el.addEventListener('blur', endSlide);
+      // A range input inside the HUD must not leak arrow keys to the camera
+      // rig or the order layer — while it has focus the arrows are ITS arrows.
+      el.addEventListener('keydown', (ev) => ev.stopPropagation());
+    }
+  }
+
+  if (elMxMusicMute) {
+    elMxMusicMute.addEventListener('click', (e) => {
+      if (e.detail > 0 && elMxMusicMute.blur) elMxMusicMute.blur();
+      const m = readMix();
+      paintMixer(pushMix({ musicMuted: !(m && m.musicMuted) }));
+    });
+  }
+  if (elMxSfxMute) {
+    elMxSfxMute.addEventListener('click', (e) => {
+      if (e.detail > 0 && elMxSfxMute.blur) elMxSfxMute.blur();
+      const m = readMix();
+      paintMixer(pushMix({ sfxMuted: !(m && m.sfxMuted) }));
+    });
+  }
+  function toggleMasterMute() {
+    let mix = null;
+    try { mix = Audio.toggleMute(); } catch (err) { mix = readMix(); }
+    paintMixer(mix);
+    if (mix) toast(mix.muted ? 'AUDIO MUTED' : 'AUDIO ON');
+  }
+  if (elMxMaster) {
+    elMxMaster.addEventListener('click', (e) => {
+      if (e.detail > 0 && elMxMaster.blur) elMxMaster.blur();
+      toggleMasterMute();
+    });
+  }
+
+  // Anything else that changes the mix (the hotkey, a console call) repaints
+  // the panel through the same door.
+  try { Audio.onMixChange(paintMixer); } catch (err) { /* older audio module */ }
+  paintMixer(readMix());
 
   /* ---- sector minimap ---------------------------------------------------- */
   // 200×200 logical. The terrain plate is baked ONCE from the same data the
@@ -2539,6 +2725,16 @@ export function initHUD(Game, deps = {}) {
   window.addEventListener('keydown', (e) => {
     const tgt = e.target;
     if (tgt && (tgt.tagName === 'INPUT' || tgt.tagName === 'TEXTAREA')) return;
+    // AUDIO MASTER MUTE — deliberately the first thing this handler does, and
+    // the only hotkey above the modal/FPV guards. "Make it stop" has to work
+    // at the exact moment the player wants it to: mid-dive, behind the OPORD,
+    // on the after-action screen. K is the only letter not already an order or
+    // a view (M T R F L X G O are taken; Tab/Enter/Esc are structural).
+    if (e.code === 'KeyK' && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      e.preventDefault();
+      toggleMasterMute();
+      return;
+    }
     // The drone feed owns the keyboard while it is up (Esc = abort feed).
     if (fpvActive) return;
     if (!elBriefing.classList.contains('hidden')) {
@@ -2621,8 +2817,8 @@ export function initHUD(Game, deps = {}) {
     <div class="br-objectives">${objRows}</div>
     <button id="ss-brief-go" class="ss-btn br-go">Commence operation</button>
     <div class="br-hint">TAB cycle · SHIFT+TAB panels · M move · T attack ·
-      R fire msn · F fpv · L loiter · X dig in · G grid · ENTER end turn ·
-      ESC cancel</div>
+      R fire msn · F fpv · L loiter · X dig in · G grid · K mute ·
+      ENTER end turn · ESC cancel</div>
   `;
 
   function commence() {
