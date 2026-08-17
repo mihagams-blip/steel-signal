@@ -74,6 +74,34 @@ const LOITER_TOP_MULT_FOOT = 1.2;
 const SUPPRESS_AT_FPV = 2;           // even a glancing FPV hit pins the target
 const JAMMED_MIN_DMG = 1;            // a degraded strike that connects still hurts
 
+// --- Barrage vs units (approved follow-up to the drone block above — same ---
+//     pattern: own base + top-attack multiplier applied to the pre-roll raw) --
+// Measured before this change: SPG (atk hard 6) vs MBT in the open was
+// delta −3 → raw 1.35 → 1–2 dmg, and BLIND fire ×0.5 then FLOORED TO 0 — a
+// battery could hit a tank and do literally nothing, which is why RED shelling
+// the approach never registered with the player. mode 'barrage' now gets its
+// own curve:
+//
+//   raw = (BARRAGE_DMG_BASE + DMG_SLOPE * delta) * topMult   (then ×roll, clamp)
+//
+// MODEL PREDICTION at midpoint roll, vet 0, no combined arms, open ground
+// (multiplier deliberately MILD — a first cut at ×1.9 made counter-battery
+// one-shot soft-skinned vehicles for a capped 7, measured in the AI harness):
+//   SPG vs MBT (delta −3) ................... 2–3 dmg  (was 1–2)
+//   SPG vs MBT, recon-spotted (delta −2) .... 3 dmg
+//   MLRS vs MBT (delta −4) .................. 2 dmg    (+1 splash ring)
+//   SPG vs soft-skinned SPG (delta +3) ...... 5–7 dmg  (counter-battery hurts)
+//   SPG vs entrenched(2) town infantry (−1) . 3 dmg    (§3.2-B said 2 — one up)
+//   Blind fire on an occupied hex ........... max(1, floor(dmg × 0.5)) — a hit
+//                                             is never 0 (see artilleryBarrage)
+// Ordering preserved vs armour: barrage chip (2–3) < loiter (4) < FPV (7).
+// Artillery stays the suppression arm, drones stay the kill arm.
+// Infrastructure shelling (infraShellDamage) is untouched — §5's "arty is
+// inefficient vs structures" still holds.
+const BARRAGE_DMG_BASE = 4;           // same base as the drone paths
+const BARRAGE_TOP_MULT_VEHICLE = 1.1; // plunging fire onto deck armour
+const BARRAGE_TOP_MULT_FOOT = 1.0;    // airburst — infantry math stays §3.1-close
+
 // Target categories by typeId (GAMEPLAY.md §1.1)
 const HARD_IDS = new Set(['mbt', 'ifv', 'apc', 'spg', 'mlrs', 'aa']);
 const FOOT_IDS = new Set(['infantry', 'atgm_team']);       // benefit from crop cover
@@ -263,9 +291,9 @@ function strikeDamage(attacker, defender, opts) {
     (defender.type && defender.type.ammo > 0 && defender.ammo <= 0
       ? NO_AMMO_DEF_MALUS : 0);
 
-  // Drone paths use their own base and a top-attack multiplier (see the
-  // constants block). Artillery keeps the documented §3.1 curve untouched — the
-  // multiplier is deliberately NOT applied to mode 'barrage'.
+  // Drone AND barrage paths use their own base and a top-attack multiplier
+  // (see the constants block — barrage was added later so an SPG vs an MBT is
+  // a real chip instead of 1–2). Direct/return fire keeps the §3.1 curve.
   let base = DMG_BASE;
   let topMult = 1;
   if (mode === 'fpv') {
@@ -276,6 +304,10 @@ function strikeDamage(attacker, defender, opts) {
     base = LOITER_DMG_BASE;
     topMult = TOP_ATTACK_VEHICLE_IDS.has(defender.typeId)
       ? LOITER_TOP_MULT_VEHICLE : LOITER_TOP_MULT_FOOT;
+  } else if (mode === 'barrage') {
+    base = BARRAGE_DMG_BASE;
+    topMult = TOP_ATTACK_VEHICLE_IDS.has(defender.typeId)
+      ? BARRAGE_TOP_MULT_VEHICLE : BARRAGE_TOP_MULT_FOOT;
   }
 
   const delta = ATK - DEF;
@@ -833,7 +865,10 @@ export function artilleryBarrage(unit, hex, ctx = {}) {
       combinedArms: hasCombinedArms(unit, occupant),
     }).dmg;
     if (!seen) {
-      dmg = Math.floor(dmg * BLIND_FIRE_MULT);
+      // ×0.5 with a floor of 1 on a genuine hit: a shell that connects with a
+      // unit is never a literal zero (GAMEPLAY §8 T1 — "blind-fires your road
+      // hex — 1 dmg"). The floor cannot manufacture damage: dmg 0 stays 0.
+      dmg = dmg > 0 ? Math.max(1, Math.floor(dmg * BLIND_FIRE_MULT)) : 0;
       report.events.push('blind fire ×0.5, no suppression');
     }
     report.dmgToDefender = dmg;
@@ -936,7 +971,8 @@ export function previewAttack(attacker, defender, opts = {}) {
         mode: 'barrage', preview: true, spotted,
         combinedArms: hasCombinedArms(attacker, defender),
       }).dmg;
-      if (!seen) d *= BLIND_FIRE_MULT;
+      // Mirror the resolver: blind ×0.5 floors at 1 on a genuine hit.
+      if (!seen) d = d > 0 ? Math.max(1, d * BLIND_FIRE_MULT) : 0;
       out.dmg = d;
       return out;
     }

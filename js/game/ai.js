@@ -37,6 +37,36 @@
 // state.js's post-action pass: fog, capture, sudden-defeat) and falls back to
 // combat.js — the authoritative resolver, which spends ammo, sets `fired` and
 // emits unitAttacked/unitKilled/log itself.
+//
+// PLAYER-FEEDBACK ROUND — "the specialty of the Russian front is drone war,
+// not tanks… I expected more of that dynamic." RED now fights drones-first:
+//
+//   • Eyes fly BEFORE the guns pick targets (recon UAV — if the OOB has one —
+//     has initiative 0 and, with no contact, pushes its circuit over the water
+//     onto the far-bank approaches until it FINDS the player). Everything is
+//     type-generic: whatever recon/FPV/loiter units the scenario gives RED are
+//     used; no unit ids are hard-coded.
+//   • Move and fire are separate actions (the same rule the player has), and
+//     RED finally uses both: an FPV team that creeps into range STRIKES from
+//     the new launch point the same phase; a battery that had to displace to
+//     reach the approach FIRES from the new position. A RED FPV strike runs
+//     the same full dronecam the player's own strikes get (combat.js plays it
+//     faction-agnostically) — GAMEPLAY §8 T3's "dronecam moment happens TO
+//     you" is this code path.
+//   • Strike teams and batteries that shoot dry fall back on the supply column
+//     and go firm beside it to re-arm (state.js's §3.1 supply tick), so the
+//     drone pressure is sustained, not a two-round cameo.
+//   • Pre-contact, one battery per phase registers defensive fires on the
+//     deploy-road chokepoint west of the crossing (§7.3 blind fire, comms
+//     tower alive) — weak by design, but the player SEES rounds landing on
+//     the road they are about to use.
+//   • EW/SHORAD rules are respected via previewAttack (abort/intercept odds
+//     folded into the EV). A strike whose discounted EV clears the bar still
+//     flies INTO the player's SHORAD umbrella and sometimes dies there — that
+//     attrition trade is the drone war, not a bug to route around.
+//   • Failures are LOUD: every swallowed exception now prints console.error
+//     AND a comms-log line, so a systematically broken RED can never again
+//     present as four turns of polite silence.
 
 import { hexDistance, hexToWorld, hexNeighbors } from '../world/terrain.js';
 import { isVisible } from './fog.js';
@@ -60,15 +90,26 @@ const CONTACT_MEMORY_TURNS = 3;   // how long RED remembers a BLUE sighting
 const HARASS_MEMORY_TURNS = 2;    // a fire mission onto a remembered position
 const ZONE_RADIUS = 3;            // "its own defensive zone", in hexes
 const MAX_ROTATIONS = 3;          // repositions per phase from the rotation pass
-const INTEL_BUDGET = 2;           // SIGINT lines per phase for unseen activity
+const INTEL_BUDGET = 3;           // SIGINT lines per phase for unseen activity
 const HARASS_COOLDOWN = 2;        // turns between interdiction missions/battery
 // A defending battery ranges the gate it expects the assault through BEFORE the
 // assault arrives — that is what registration of defensive fires IS, and it is
 // also what turns RED's opening turns from silence into rounds landing on the
 // crossing the player has to use. Rationed hard: never the last rounds, never
 // more than twice per battery for the whole scenario, one mission per phase.
-const INTERDICT_FROM_TURN = 2;
+const INTERDICT_FROM_TURN = 1;    // §8 T1 scripts shells on the road from RED's first phase
 const MAX_INTERDICT_PER_BATTERY = 2;
+// Which crossings count as "serving the threatened axis". Measured in the
+// harness: with the old cap of 5 the FIRST contact (BLUE's recon UAV crossing
+// the line) pulled the anchor 6+ hexes west of every gate and interdiction
+// starved for the whole scenario — the anchor is where BLUE is, and BLUE is
+// an approach march away from the span by definition. 9 keeps the far-flank
+// crossing (14+ away in scenario01) excluded while the axis crossing stays in.
+const INTERDICT_GATE_RADIUS = 9;
+// Loitering rounds are the scenario's scarcest asset; a spotted target sitting
+// on or beside a live crossing/chokepoint (§7: infrastructure-adjacent) is
+// worth proportionally more of one.
+const LOITER_CHOKE_MULT = 1.35;
 
 const ARTY_IDS = ['spg', 'mlrs'];
 const DRONE_STRIKE_IDS = ['fpv_drone', 'loiter_munition'];
@@ -104,6 +145,7 @@ const MEM = {
   patrol: new Map(),    // red unit id → { legs: [hex], i }
   contacts: new Map(),  // blue unit id → { hex, turn, unit }
   contactMade: false,   // RED has seen BLUE at least once this scenario
+  groundContactMade: false, // …seen BLUE *ground* forces (a UAV is not an axis)
   lastTurn: 0,
 };
 
@@ -122,9 +164,13 @@ function resetMemory() {
 // Small helpers
 // ---------------------------------------------------------------------------
 function initiativeOf(u) {
-  if (ARTY_IDS.includes(u.typeId)) return 0;
-  if (DRONE_STRIKE_IDS.includes(u.typeId)) return 1;
-  if (u.typeId === 'recon_drone') return 2;
+  // Eyes up FIRST: the UAV's leg refreshes RED's fog before the guns pick
+  // targets, so this phase's fire missions run on this phase's spotting. §7
+  // groups recon with the drones; flying it at the head of the column is what
+  // turns "drones first" from a sentence into a doctrine.
+  if (u.typeId === 'recon_drone') return 0;
+  if (ARTY_IDS.includes(u.typeId)) return 1;
+  if (DRONE_STRIKE_IDS.includes(u.typeId)) return 2;
   if (u.typeId === 'aa' || u.typeId === 'ew') return 3;
   return 4;
 }
@@ -369,7 +415,15 @@ async function walk(Game, u, path) {
   const from = { q: u.hex.q, r: u.hex.r };
   try {
     await Game.moveUnit(u, path);
-  } catch (_) { return false; }
+  } catch (err) {
+    // moveUnit answers benign refusals by RETURNING false — a throw is a
+    // systemic break and must never be silent again.
+    console.error('[ai] moveUnit THREW (systemic — investigate):', u.typeId, err);
+    try {
+      Game.emit('log', `AI ERROR — RED ${u.typeId} movement failed; see console.`);
+    } catch (_) { /* the log bus itself is down */ }
+    return false;
+  }
   const moved = u.hex.q !== from.q || u.hex.r !== from.r;
   if (moved) {
     u.moved = true;
@@ -543,10 +597,43 @@ function approachTo(Game, gate, reds) {
     if (occ && occ.faction === 'red') continue;   // fire mission would be denied
     const d = hexDistance(com, n);
     if (d < base) continue;         // never drop rounds behind RED's own line
-    const s = d - hexDistance(gate, n) * 0.25;    // far side, hugging the span
+    // The ROAD hex dominates: the deploy road into the crossing is the
+    // chokepoint §7.3 names, the ground the player's column is actually
+    // driving on when the blind rounds arrive. Distance terms only break
+    // ties — measured in the harness, a raw far-side distance score kept
+    // picking open field two hexes off the road instead of the road itself.
+    const s = (t.type === 'road' ? 2 : 0) - hexDistance(gate, n) * 0.25 + d * 0.05;
     if (s > bestS) { bestS = s; best = n; }
   }
   return best;
+}
+
+/**
+ * Pre-contact aiming point for the batteries: the deploy-road chokepoint on
+ * the far-bank approach to the gate nearest the anchor. Cached per phase; the
+ * moment RED has ANY live or remembered contact this returns null and the
+ * batteries range the contact mass instead. Displacement uses it too, so a
+ * battery out of range of the approach marches until the approach is in range
+ * — then fires the registration mission the same phase (move + fire are
+ * separate actions).
+ */
+function interdictAim(ctx) {
+  // A UAV overhead is not a target list: registration of the chokepoint keeps
+  // going until RED knows about BLUE units it can actually shell.
+  if (groundContacts(ctx.known).length) return null;
+  if (ctx._interdictAim !== undefined) return ctx._interdictAim;
+  const Game = ctx.Game;
+  let best = null;
+  for (const g of crossings(Game)) {
+    if (hexDistance(ctx.anchor, g) > INTERDICT_GATE_RADIUS) continue;
+    const a = approachTo(Game, g, ctx.reds);
+    if (!a) continue;
+    if (!best || hexDistance(ctx.anchor, a) < hexDistance(ctx.anchor, best)) {
+      best = a;
+    }
+  }
+  ctx._interdictAim = best || null;
+  return ctx._interdictAim;
 }
 
 /**
@@ -554,9 +641,20 @@ function approachTo(Game, gate, reds) {
  * failing that the crossing nearest its own centre of mass — the gate the
  * assault has to come through. Batteries range it; the reserve shifts toward it.
  */
+/**
+ * Contacts that define an AXIS: everything except the enemy's recon flyer.
+ * Measured in the harness: anchoring on a lone UAV overflight sent both RED
+ * batteries driving ACROSS the bridge to hold "ideal range" from an aircraft
+ * they cannot even shell. FPV and loiter teams are ground contacts and count.
+ */
+function groundContacts(known) {
+  return known.filter((k) => !(k.unit && k.unit.typeId === 'recon_drone'));
+}
+
 function threatAnchor(Game, reds, known) {
-  if (known.length) {
-    const c = centroid(known.map((k) => ({ hex: k.hex })));
+  const ground = groundContacts(known);
+  if (ground.length) {
+    const c = centroid(ground.map((k) => ({ hex: k.hex })));
     if (c) return c;
   }
   const com = centroid(reds) || (reds[0] && reds[0].hex) || { q: 0, r: 0 };
@@ -579,6 +677,23 @@ function onObjective(Game, hex) {
     (o) => o.hex && o.hex.q === hex.q && o.hex.r === hex.r);
 }
 
+/**
+ * Fold everything RED can currently see into its contact memory. Called at the
+ * top of the phase AND after every unit acts — the recon UAV flies at
+ * initiative 0 precisely so the sightings from ITS leg are already in memory
+ * when the batteries and FPV teams take their decisions this same phase.
+ */
+function recordContacts(Game) {
+  for (const b of Game.units) {
+    if (!b.alive || b.faction !== 'blue') continue;
+    if (!redSees(Game, b.hex)) continue;
+    MEM.contacts.set(b.id, {
+      hex: { q: b.hex.q, r: b.hex.r }, turn: Game.turn, unit: b,
+    });
+    MEM.contactMade = true;
+  }
+}
+
 function memoryTick(Game, posture) {
   if (Game.turn < MEM.lastTurn) resetMemory();
   MEM.lastTurn = Game.turn;
@@ -591,19 +706,20 @@ function memoryTick(Game, posture) {
       MEM.home.set(u.id, { q: u.hex.q, r: u.hex.r });
     }
   }
-  for (const b of Game.units) {
-    if (!b.alive || b.faction !== 'blue') continue;
-    if (!redSees(Game, b.hex)) continue;
-    MEM.contacts.set(b.id, {
-      hex: { q: b.hex.q, r: b.hex.r }, turn: Game.turn, unit: b,
-    });
-    MEM.contactMade = true;
-  }
+  recordContacts(Game);
   for (const [id, c] of MEM.contacts) {
     if (!c.unit || !c.unit.alive || Game.turn - c.turn > CONTACT_MEMORY_TURNS) {
       MEM.contacts.delete(id);
     }
   }
+}
+
+/** A live piece of infrastructure on or beside this hex — the chokepoints. */
+function nearAliveInfra(Game, hex) {
+  const features = Game.deps && Game.deps.features;
+  const list = (features && features.infrastructure) || [];
+  return list.some((o) => o && o.alive !== false && o.hex &&
+    hexDistance(o.hex, hex) <= 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -671,7 +787,18 @@ async function fireMission(ctx, u, hex, exact) {
   // Cause before consequence: the fire order, then combat.js's result line.
   if (exact) Game.emit('log', exact);
   let res = null;               // NB: never name this `report` — it would shadow
-  try { res = orderBarrage(Game, u, hex); } catch (_) { res = null; }
+  try {
+    res = orderBarrage(Game, u, hex);
+  } catch (err) {
+    res = null;
+    // The resolver answers every bad order by RETURNING a refusal report — a
+    // throw here is systemic and must be loud (the order line above already
+    // printed, so a silent failure would leave a phantom mission in the log).
+    console.error('[ai] fire mission THREW (systemic — investigate):', u.typeId, err);
+    try {
+      Game.emit('log', `AI ERROR — RED ${u.typeId} fire mission failed; see console.`);
+    } catch (_) { /* the log bus itself is down */ }
+  }
   ctx.stats.missions++;
   await ctx.beat(framed, FIRE_HOLD_MS);
   return res;
@@ -796,6 +923,7 @@ async function tryArtilleryFire(ctx, u) {
   for (const c of MEM.contacts.values()) {
     if (Game.turn - c.turn > HARASS_MEMORY_TURNS) continue;
     if (!c.unit || !c.unit.alive) continue;
+    if (c.unit.typeId === 'recon_drone') continue; // cannot shell a UAV's shadow
     if (redSees(Game, c.unit.hex)) continue;     // handled by branch 1
     const d = hexDistance(u.hex, c.hex);
     if (d < 1 || d > range) continue;
@@ -836,7 +964,7 @@ async function tryArtilleryFire(ctx, u) {
   let aim = null;
   let aimGate = null;
   for (const g of crossings(Game)) {
-    if (hexDistance(ctx.anchor, g) > 5) continue;
+    if (hexDistance(ctx.anchor, g) > INTERDICT_GATE_RADIUS) continue;
     const a = approachTo(Game, g, ctx.reds);
     if (!a) continue;
     const d = hexDistance(u.hex, a);
@@ -866,13 +994,31 @@ async function tryArtilleryDisplace(ctx, u) {
   const Game = ctx.Game;
   if (u.moved) return false;
   const range = u.type.range || 5;
-  const anchor = ctx.anchor;
+  // Pre-contact the battery positions to range the deploy-road chokepoint it
+  // is about to register (interdictAim); once there is a contact, the mass of
+  // what RED knows about BLUE (the anchor) takes over.
+  const anchor = interdictAim(ctx) || ctx.anchor;
   const ideal = Math.max(1, range - 1);
+  const home = homeOf(u);
+  const com = centroid(ctx.reds) || home;
+  const eg = groundContacts(ctx.known);
+  const enemyCom = eg.length ? centroid(eg.map((k) => ({ hex: k.hex }))) : null;
   const hex = pickHex(Game, u, (h, t) => {
+    // A battery holds ITS side of the field: any hex as close to the enemy's
+    // ground mass as to RED's own — the equidistant midline is the bridge
+    // itself — is the enemy's half of the ring. Measured in the harness:
+    // without this the ideal-range chase marched both batteries across the
+    // water to shell the column from beside it. When the mass is out of reach
+    // from RED's side, the battery waits at the line for the targets to come
+    // into range instead of chasing. (No known ground enemy → no rule — the
+    // pre-contact registration ring is on RED's own terms already.)
+    if (enemyCom &&
+        hexDistance(h, enemyCom) <= hexDistance(h, com)) return -1e9;
     const d = hexDistance(anchor, h);
     let s = 0;
     if (d > ideal) s -= (d - ideal) * 14;        // out of reach — come forward
     else s -= (ideal - d) * 2;                   // in reach — stay deep
+    s -= hexDistance(home, h) * 1.2;             // and stay near the zone it knows
     const fd = frontDist(ctx, h);
     if (fd <= 2) s -= 120;                       // never park a gun in contact
     else if (fd <= 3) s -= 55;
@@ -888,6 +1034,14 @@ async function tryArtilleryDisplace(ctx, u) {
 }
 
 // §7.4 FPV / loiter strike vs the highest-value BLUE armour in reach.
+// previewAttack folds the EW abort and the SHORAD intercept odds into the EV,
+// so a jammed shot below FPV_MIN_EV is skipped (§7.4) — but a strike whose
+// DISCOUNTED EV still clears the bar flies straight into the player's AA
+// umbrella and eats the 40/50 % intercepts. Losing airframes to a well-placed
+// SHORAD is the trade the drone war is made of; the AI does not route around
+// it. Loitering rounds additionally weight targets sitting on or beside live
+// infrastructure — the bridge chokepoints §7 names — so massing armour at the
+// crossing is exactly what draws the Shahed.
 async function tryDroneStrike(ctx, u) {
   const Game = ctx.Game;
   if (!DRONE_STRIKE_IDS.includes(u.typeId) || u.fired || u.ammo <= 0) return false;
@@ -901,7 +1055,10 @@ async function tryDroneStrike(ctx, u) {
   for (const b of targets) {
     const ev = previewAttack(u, b);        // folds EW abort + AA intercept
     if (ev.dmg < FPV_MIN_EV) continue;     // skip jammed/screened low-value shots
-    const s = ev.dmg * val(b);
+    let s = ev.dmg * val(b);
+    if (u.typeId === 'loiter_munition' && nearAliveInfra(Game, b.hex)) {
+      s *= LOITER_CHOKE_MULT;              // §7: infrastructure-adjacent chokepoint
+    }
     if (s > bestS) { bestS = s; best = b; }
   }
   if (!best) return false;
@@ -915,10 +1072,45 @@ async function tryDroneStrike(ctx, u) {
     : orderLoiter(Game, u, best);
   ctx.stats.strikes++;
   if (res && res.done) {
-    try { await res.done; } catch (_) { /* the cinematic is optional */ }
+    // The dronecam promise is contract-guaranteed to resolve; a rejection is a
+    // cinematic bug, not a rules bug — state is already final. Loud anyway.
+    try { await res.done; } catch (err) {
+      console.error('[ai] dronecam promise rejected (cosmetic, but report it):', err);
+    }
   }
   await ctx.beat(framed, FIRE_HOLD_MS);
   return true;
+}
+
+// A strike team or battery that has shot itself dry walks back to the supply
+// column and goes FIRM beside it — state.js's §3.1 supply tick refills a unit
+// that ends the turn adjacent to a truck having neither moved nor fired. This
+// is what turns RED's drone pressure from a two-round cameo into a cycle:
+// strike, strike, fall back, re-arm, come again.
+async function tryRearm(ctx, u) {
+  const Game = ctx.Game;
+  if (u.ammo > 0) return false;
+  const trucks = ctx.reds.filter((v) => traits(v).includes('supply'));
+  if (!trucks.length) return false;
+  const truck = nearest(u.hex, trucks, (t) => t.hex);
+  if (!truck) return false;
+  if (hexDistance(u.hex, truck.hex) <= 1) {
+    // On station: holding still IS the action (the resupply predicate).
+    if (!u.moved && !u.fired) {
+      report(ctx, blueSees(Game, u.hex),
+        `${armLabel(u)} goes firm beside the supply column to re-arm.`,
+        `SIGINT: a RED ${intelLabel(u)} goes quiet ${areaHint(Game, u.hex)}.`);
+    }
+    return true;
+  }
+  if (u.moved) return true;                // already walked — hold the claim
+  const hex = pickHex(Game, u, (h, t) =>
+    -hexDistance(truck.hex, h) * 10 + (t ? (t.cover || 0) * 2 : 0) -
+    (frontDist(ctx, h) <= 3 ? 60 : 0) - (wasRecently(u, h) ? 15 : 0));
+  if (!hex) return true;                   // boxed in — wait for a lane
+  return relocate(ctx, u, hex,
+    `${armLabel(u)} falls back on the supply column to re-arm.`,
+    `SIGINT: a RED ${intelLabel(u)} goes quiet ${areaHint(Game, hex)}.`);
 }
 
 // CRITIQUE 19(c), shipped-scenario half. scenario01's RED order of battle has
@@ -971,7 +1163,14 @@ async function tryAA(ctx, u) {
     if (drone) {
       const framed = await ctx.cine.frame(drone.hex);
       Game.emit('log', `${armLabel(u)} engages the BLUE UAV over ${placeOf(Game, drone.hex)}.`);
-      try { orderAttack(Game, u, drone); } catch (_) { /* resolver logs it */ }
+      try {
+        orderAttack(Game, u, drone);
+      } catch (err) {
+        console.error('[ai] SHORAD engagement THREW (systemic — investigate):', err);
+        try {
+          Game.emit('log', 'AI ERROR — RED aa engagement failed; see console.');
+        } catch (_) { /* the log bus itself is down */ }
+      }
       ctx.stats.shots++;
       await ctx.beat(framed, FIRE_HOLD_MS);
       return true;
@@ -1018,21 +1217,45 @@ async function tryFollowBody(ctx, u) {
 // CRITIQUE 19(c): eyes fly a leg EVERY turn. The UAV works a circuit over the
 // gates RED is defending, so it keeps re-spotting for the guns instead of
 // parking on top of the BLUE mass and dying to SHORAD.
-function patrolLeg(ctx, u) {
+/**
+ * The circuit a unit with eyes flies/walks. `deep` (the recon UAV) matters
+ * when RED has NO contact: the flyer's circuit then pushes over the water onto
+ * the far-bank approaches — the ground BLUE has to form up on — until it FINDS
+ * the player, because an army with no target list cannot fight drones-first.
+ * Ground strike teams never get the far-bank legs (an FPV team west of the
+ * river is two men and a suitcase in the wrong country). The circuit is
+ * replanned whenever the contact picture flips (none → some or back).
+ */
+function patrolLeg(ctx, u, deep = false) {
   const Game = ctx.Game;
+  const hasContact = ctx.known.length > 0;
   let rec = MEM.patrol.get(u.id);
+  if (rec && rec.hadContact !== hasContact) rec = null;   // situation changed
   if (!rec || !rec.legs || !rec.legs.length) {
     const legs = [];
-    for (const h of crossings(Game)) legs.push({ q: h.q, r: h.r });
-    for (const o of (Game.objectives || [])) {
-      if (o && o.hex && o.owner === 'red') legs.push({ q: o.hex.q, r: o.hex.r });
-    }
-    if (ctx.known.length) {
+    if (hasContact) {
       const c = centroid(ctx.known.map((k) => ({ hex: k.hex })));
       if (c) legs.push(c);
     }
+    for (const h of crossings(Game)) {
+      if (deep && !hasContact) {
+        // The probe leg sits BEYOND the far-bank approach (extended along the
+        // gate→approach line), and comes BEFORE the gate leg: an approach hex
+        // adjacent to the span would be swallowed by the arrive-within-1 leg
+        // advance and the flyer would never actually cross the water.
+        const a = approachTo(Game, h, ctx.reds);
+        if (a) {
+          const probe = { q: a.q + (a.q - h.q) * 2, r: a.r + (a.r - h.r) * 2 };
+          legs.push(tileAt(Game, probe) ? probe : { q: a.q, r: a.r });
+        }
+      }
+      legs.push({ q: h.q, r: h.r });
+    }
+    for (const o of (Game.objectives || [])) {
+      if (o && o.hex && o.owner === 'red') legs.push({ q: o.hex.q, r: o.hex.r });
+    }
     if (!legs.length) legs.push({ q: u.hex.q, r: u.hex.r });
-    rec = { legs, i: 0 };
+    rec = { legs, i: 0, hadContact: hasContact };
     MEM.patrol.set(u.id, rec);
   }
   if (hexDistance(u.hex, rec.legs[rec.i]) <= 1) {
@@ -1044,7 +1267,7 @@ function patrolLeg(ctx, u) {
 async function tryReconPatrol(ctx, u) {
   const Game = ctx.Game;
   if (u.typeId !== 'recon_drone' || u.moved) return false;
-  const leg = patrolLeg(ctx, u);
+  const leg = patrolLeg(ctx, u, true);   // deep: push out until contact is made
   const blueAA = ctx.blues.filter((b) => b.typeId === 'aa');
   const hex = pickHex(Game, u, (h) => {
     let s = -hexDistance(leg, h) * 8;
@@ -1079,7 +1302,14 @@ async function tryDirectAttack(ctx, u) {
   }
   if (!best || bestNet < -0.5) return false;     // never trade badly on purpose
   const framed = await ctx.cine.frame(best.hex);
-  try { orderAttack(Game, u, best); } catch (_) { /* resolver logs it */ }
+  try {
+    orderAttack(Game, u, best);
+  } catch (err) {
+    console.error('[ai] direct attack THREW (systemic — investigate):', u.typeId, err);
+    try {
+      Game.emit('log', `AI ERROR — RED ${u.typeId} attack failed; see console.`);
+    } catch (_) { /* the log bus itself is down */ }
+  }
   ctx.stats.shots++;
   await ctx.beat(framed, FIRE_HOLD_MS);
   return true;
@@ -1199,7 +1429,10 @@ async function rotateTheLine(ctx, strict = true, limit = MAX_ROTATIONS) {
       ok = await relocate(ctx, u, hex, line,
         `SIGINT: a RED ${intelLabel(u)} relocates ${areaHint(Game, hex)}.`);
     } catch (err) {
-      console.warn('[ai] rotation failed:', u.typeId, err);
+      console.error('[ai] rotation THREW (systemic — investigate):', u.typeId, err);
+      try {
+        Game.emit('log', `AI ERROR — RED ${u.typeId} rotation failed; see console.`);
+      } catch (_) { /* the log bus itself is down */ }
     }
     if (ok) done++;
   }
@@ -1215,18 +1448,20 @@ async function rotateTheLine(ctx, strict = true, limit = MAX_ROTATIONS) {
  */
 async function insistOnMovement(ctx) {
   if (ctx.Game.phase === 'over') return 0;
+  const loud = (err, which) => {
+    console.error(`[ai] ${which} rotation pass THREW (systemic — investigate):`, err);
+    try {
+      ctx.Game.emit('log', 'AI ERROR — RED rotation pass failed; see console.');
+    } catch (_) { /* the log bus itself is down */ }
+  };
   let done = 0;
   try {
     done = await rotateTheLine(ctx, true, MAX_ROTATIONS);
-  } catch (err) {
-    console.warn('[ai] rotation pass failed:', err);
-  }
+  } catch (err) { loud(err, 'strict'); }
   if (done > 0 || ctx.Game.phase === 'over') return done;
   try {
     done = await rotateTheLine(ctx, false, 1);
-  } catch (err) {
-    console.warn('[ai] relaxed rotation pass failed:', err);
-  }
+  } catch (err) { loud(err, 'relaxed'); }
   return done;
 }
 
@@ -1264,6 +1499,7 @@ async function actUnit(ctx, u) {
   const Game = ctx.Game;
   ctx.blues = aliveOf(Game, 'blue');
   ctx.reds = aliveOf(Game, 'red');
+  recordContacts(Game);          // fold mid-phase sightings (the UAV's leg) in
   ctx.known = knownBlue(Game);   // a unit that moved may have opened a contact
   if (!ctx.blues.length) return false;
 
@@ -1276,13 +1512,23 @@ async function actUnit(ctx, u) {
   }
   if (ARTY_IDS.includes(u.typeId)) {
     const fired = await tryArtilleryFire(ctx, u);                  // 70
-    // Shoot-and-scoot: a battery that has fired still displaces if it can.
+    if (!fired && u.ammo <= 0 && await tryRearm(ctx, u)) return true;
+    // Shoot-and-scoot: a battery that has fired still displaces if it can —
+    // and one that could NOT reach anything marches into range and fires from
+    // the new position the same phase (move + fire are separate actions,
+    // exactly as they are for the player).
     const moved = await tryArtilleryDisplace(ctx, u);
+    if (!fired && moved && await tryArtilleryFire(ctx, u)) return true;
     return fired || moved;
   }
   if (DRONE_STRIKE_IDS.includes(u.typeId)) {
     if (await tryDroneStrike(ctx, u)) return true;                 // 65
-    return tryDroneCreep(ctx, u);
+    if (u.ammo <= 0 && await tryRearm(ctx, u)) return true;        // dry — cycle back
+    const crept = await tryDroneCreep(ctx, u);
+    // The creep may have walked a target into the strike envelope: launch from
+    // the new position the same phase (move + fire are separate actions).
+    if (crept && await tryDroneStrike(ctx, u)) return true;
+    return crept;
   }
   if (u.typeId === 'recon_drone') {
     return tryReconPatrol(ctx, u);                                 // 45
@@ -1352,7 +1598,13 @@ export async function runAITurn(Game) {
         try {
           await actUnit(ctx, u);
         } catch (err) {
-          console.warn('[ai] unit error — unit passes:', u.typeId, err);
+          // The unit still passes (the turn must always resolve — contract),
+          // but never silently: a repeated line here is a systematic failure
+          // and the whole "RED does nothing" era began as swallowed throws.
+          console.error('[ai] UNIT ORDERS THREW — unit passes:', u.typeId, u.id, err);
+          try {
+            Game.emit('log', `AI ERROR — RED ${u.typeId} passes its turn (exception; see console).`);
+          } catch (_) { /* the log bus itself is down */ }
         }
       }
 
@@ -1380,8 +1632,10 @@ export async function runAITurn(Game) {
         : 'RED phase complete — the line stays silent.');
     }
   } catch (err) {
-    console.warn('[ai] turn error — RED passes:', err);
-    try { Game.emit('log', 'RED command hesitates — no orders issued.'); } catch (_) { /* noop */ }
+    console.error('[ai] RED TURN THREW — phase abandoned (systemic — investigate):', err);
+    try {
+      Game.emit('log', 'AI ERROR — RED turn aborted by an exception; see console.');
+    } catch (_) { /* the log bus itself is down */ }
   }
 
   // CRITIQUE 20: hold on the action before control goes back to the player, and

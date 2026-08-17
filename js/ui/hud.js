@@ -69,6 +69,26 @@ const TRAIT_LABELS = {
   entrench_bonus: 'SAPPERS', intercept: 'INTERCEPT',
 };
 
+// PLAYER-FEEDBACK ROUND — "I do not know what Loiter means." One plain-language
+// line per specialist type, shown on the unit card whenever that type is
+// selected (and mirrored, for the ORDERS, by the action-bar data-tip bubbles).
+// The truck's line is also the answer to "I do not know how to resupply":
+// the §3.1 rule, stated where the player is already looking.
+const ROLE_HINTS = {
+  fpv_drone: 'FPV team — first-person kamikaze drones (range 4 hexes): top ' +
+    'attack, strong vs armour; can be jammed by EW or shot down by AA. Each ' +
+    'strike consumes an airframe.',
+  loiter_munition: 'Loiter battery — loitering munitions (e.g. Lancet) circle ' +
+    'and dive; range 10 hexes; the only weapon that can destroy infrastructure ' +
+    'at distance.',
+  recon_drone: 'Recon UAV — a flying spotter: artillery firing at targets it ' +
+    'sees hits at full effect. Keep it forward, away from enemy SHORAD.',
+  ew: 'EW jammer — projects a jamming bubble (radius 2): enemy FPV strikes ' +
+    'can abort, drone damage drops, enemy recon inside is blinded.',
+  truck: 'Supply truck — any unit that ends the turn on an adjacent hex ' +
+    'without moving or firing refills its ammo and repairs +2 hp (up to 8).',
+};
+
 const INFRA_NAMES = {
   bridge: 'BRIDGE', substation: 'SUBSTATION', fuel_depot: 'FUEL DEPOT',
   rail_yard: 'RAIL YARD', comms_tower: 'COMMS TOWER',
@@ -494,22 +514,23 @@ export function initHUD(Game, deps = {}) {
         <div class="uc-bar"><span class="k">AMMO</span><span class="pips ammo" id="uc-ammo"></span></div>
         <div class="uc-stats" id="uc-stats"></div>
         <div class="uc-tags" id="uc-tags"></div>
+        <div class="uc-hint hidden" id="uc-hint"></div>
       </div>
     </div>
 
     <div id="ss-actionbar" class="ss-panel" role="group" aria-label="Fire control">
       <button class="ss-act" data-act="move" aria-label="Move (M)"
-              title="Order movement [M]"><i aria-hidden="true">M</i><span>Move</span></button>
+              data-tip="Order movement [M]. Move and fire are separate actions — a unit that has moved can still fire."><i aria-hidden="true">M</i><span>Move</span></button>
       <button class="ss-act" data-act="attack" aria-label="Attack (T)"
-              title="Direct fire [T]"><i aria-hidden="true">T</i><span>Attack</span></button>
+              data-tip="Direct fire [T] at an enemy within range and sight."><i aria-hidden="true">T</i><span>Attack</span></button>
       <button class="ss-act" data-act="artillery" aria-label="Fire mission (R)"
-              title="Fire mission [R]"><i aria-hidden="true">R</i><span>Fire msn</span></button>
+              data-tip="Indirect artillery [R] — needs a spotted target for full effect; blind fire is weak."><i aria-hidden="true">R</i><span>Fire msn</span></button>
       <button class="ss-act" data-act="fpv" aria-label="FPV strike (F)"
-              title="FPV strike [F]"><i aria-hidden="true">F</i><span>FPV</span></button>
+              data-tip="First-person kamikaze drone [F] — top attack, strong vs armour; can be jammed by EW or shot down by AA. Consumes an airframe."><i aria-hidden="true">F</i><span>FPV</span></button>
       <button class="ss-act" data-act="loiter" aria-label="Loitering munition (L)"
-              title="Loitering munition [L]"><i aria-hidden="true">L</i><span>Loiter</span></button>
+              data-tip="Loitering munition [L] (kamikaze drone, e.g. Lancet) — circles and dives; long range; the only weapon that can destroy infrastructure at distance."><i aria-hidden="true">L</i><span>Loiter</span></button>
       <button class="ss-act" data-act="entrench" aria-label="Dig in (X)"
-              title="Dig in [X]"><i aria-hidden="true">X</i><span>Dig in</span></button>
+              data-tip="Entrench [X]: +defense next turn, lost on moving."><i aria-hidden="true">X</i><span>Dig in</span></button>
       <div class="ab-sep"></div>
       <button id="ss-endturn" class="ss-btn" aria-label="End turn (Enter)"
               title="End turn [Enter]">End turn</button>
@@ -549,6 +570,7 @@ export function initHUD(Game, deps = {}) {
   const elAmmo = $('#uc-ammo');
   const elStats = $('#uc-stats');
   const elTags = $('#uc-tags');
+  const elHint = $('#uc-hint');
   const elActs = [...root.querySelectorAll('.ss-act')];
   const elEndTurn = $('#ss-endturn');
   const elLog = $('#ss-log-entries');
@@ -774,8 +796,13 @@ export function initHUD(Game, deps = {}) {
 
   /* ---- unit card -------------------------------------------------------- */
 
-  const statCell = (k, v) =>
-    `<span class="st"><span class="k">${k}</span><span class="v">${v}</span></span>`;
+  const statCell = (k, v, tip) =>
+    `<span class="st"${tip ? ` title="${esc(tip)}"` : ''}><span class="k">${k}</span><span class="v">${v}</span></span>`;
+
+  // ITEM 4 (round 2) — ranges are stated in hexes, in words, everywhere the
+  // number appears. "RNG 4" answered a question the player did not know how to
+  // ask; "4 HEX" plus a spelled-out title does.
+  const hexN = (n) => `${n | 0} ${(n | 0) === 1 ? 'hex' : 'hexes'}`;
 
   function renderCard() {
     if (!sel || !sel.alive) { elCard.classList.add('hidden'); return; }
@@ -795,12 +822,15 @@ export function initHUD(Game, deps = {}) {
       : '<span class="na">—</span>';
     elAmmo.className = `pips ammo${sel.ammo === 0 && maxAmmo > 0 ? ' low' : ''}`;
     const a = t.attack || {};
+    const rng = t.range ?? 0;
     elStats.innerHTML = [
-      statCell('ATK S·H·A', `${a.soft ?? 0}·${a.hard ?? 0}·${a.air ?? 0}`),
-      statCell('DEF', t.defense ?? 0),
-      statCell('MOV', t.move ?? 0),
-      statCell('RNG', t.range ?? 0),
-      statCell('SGT', t.sight ?? 0),
+      statCell('ATK S·H·A', `${a.soft ?? 0}·${a.hard ?? 0}·${a.air ?? 0}`,
+        'Attack vs soft / hard / air targets'),
+      statCell('DEF', t.defense ?? 0, 'Defense'),
+      statCell('MOV', t.move ?? 0, `Movement: ${hexN(t.move ?? 0)} per turn`),
+      statCell('RNG', rng > 0 ? `${rng} HEX` : '—',
+        rng > 0 ? `Weapon range: ${hexN(rng)}` : 'No weapon'),
+      statCell('SGT', t.sight ?? 0, `Sight: ${hexN(t.sight ?? 0)}`),
     ].join('');
     const tags = [];
     for (const tr of (t.traits || [])) {
@@ -808,10 +838,50 @@ export function initHUD(Game, deps = {}) {
     }
     if (sel.entrench > 0) tags.push(`<span class="tag good">DUG-IN +${sel.entrench}</span>`);
     if (sel.suppressed) tags.push('<span class="tag bad">SUPPRESSED</span>');
-    if (sel.ammo === 0 && maxAmmo > 0) tags.push('<span class="tag warn">NO AMMO</span>');
+    // PLAYER-FEEDBACK ROUND — "I do not know how to resupply." A bare NO AMMO
+    // tag told the player what is wrong and nothing about what to do; the tag
+    // now names the remedy.
+    if (sel.ammo === 0 && maxAmmo > 0) {
+      tags.push('<span class="tag warn">OUT OF AMMO — RESUPPLY AT A SUPPLY TRUCK</span>');
+    }
     if (sel.moved) tags.push('<span class="tag dim">MOVED</span>');
     if (sel.fired) tags.push('<span class="tag dim">FIRED</span>');
+    // And the other half: when resupply is actually ON OFFER, say so before the
+    // player wanders off. `Game.resupplyEligible` is the systems side of this
+    // round's contract (see INTEGRATION_NOTES, GAMEPLAY ROUND entry) and
+    // mirrors `_supplyTick` §3.1 exactly; the local fallback below keeps the
+    // chip honest if the HUD ever boots against an older state.js.
+    if (sel.faction === 'blue' && resupplyOnOffer(sel)) {
+      tags.push('<span class="tag good">RESUPPLY — HOLD POSITION UNTIL END OF TURN</span>');
+    }
     elTags.innerHTML = tags.join('');
+    // Specialist role line — the loiter battery, FPV team, recon UAV, jammer
+    // and supply truck each carry one sentence of doctrine on their card.
+    if (elHint) {
+      const hint = ROLE_HINTS[sel.typeId];
+      elHint.textContent = hint || '';
+      elHint.classList.toggle('hidden', !hint);
+    }
+  }
+
+  // "Would ending the turn right now resupply this unit?" Prefer the state
+  // layer's own answer (`Game.resupplyEligible`, this round's contract); the
+  // fallback is a HUD-side mirror of `_supplyTick` §3.1 read from the same
+  // Game.units array the mechanic reads, so it cannot disagree.
+  function resupplyOnOffer(u) {
+    if (typeof Game.resupplyEligible === 'function') {
+      try { return !!Game.resupplyEligible(u); } catch (e) { /* fall through */ }
+    }
+    if (!u || !u.alive || !u.hex || u.moved || u.fired) return false;
+    const t = u.type || {};
+    if ((t.traits || []).includes('supply')) return false;
+    const near = Game.units.some((s) => s !== u && s.alive &&
+      s.faction === u.faction && s.hex && s.type &&
+      (s.type.traits || []).includes('supply') &&
+      hexDistance(s.hex, u.hex) === 1);
+    if (!near) return false;
+    const maxAmmo = t.ammo | 0;
+    return (maxAmmo > 0 && u.ammo < maxAmmo) || u.hp < 8;
   }
 
   /* ---- action bar ------------------------------------------------------- */
@@ -843,11 +913,68 @@ export function initHUD(Game, deps = {}) {
     }
   }
 
+  // PLAYER-FEEDBACK ROUND — "sometimes when I move a unit it is still green,
+  // but I cannot move it again." Move and fire are separate actions by design;
+  // the bar now SAYS so. A selected unit that has moved strikes the Move label
+  // through (css/ui.css .ss-act.used) and its tooltip states the rule instead
+  // of repeating "Order movement" over a button that will not take the order.
+  const MOVE_TIP_FRESH = 'Order movement [M]. Move and fire are separate ' +
+    'actions — a unit that has moved can still fire.';
+  const MOVE_TIP_USED = 'Already moved this turn — move and fire are separate ' +
+    'actions; this unit can still fire if it has a weapon and ammo.';
+
+  // ITEM 4 (round 2) — the weapon tooltips state the selected unit's actual
+  // reach in hexes. The generic strings stay for when nothing (or an enemy) is
+  // selected; the moment a BLUE unit with that action is up, the bubble names
+  // its number, so "how far can this shoot" is answered where the order is
+  // given. Static text otherwise identical in doctrine to the shipped strings.
+  const WEAPON_TIP_BASE = {
+    attack: 'Direct fire [T] at an enemy within range and sight.',
+    artillery: 'Indirect artillery [R] — needs a spotted target for full ' +
+      'effect; blind fire is weak.',
+    fpv: 'First-person kamikaze drone [F] — top attack, strong vs armour; ' +
+      'can be jammed by EW or shot down by AA. Consumes an airframe.',
+    loiter: 'Loitering munition [L] (kamikaze drone, e.g. Lancet) — circles ' +
+      'and dives; long range; the only weapon that can destroy infrastructure ' +
+      'at distance.',
+  };
+
+  function weaponTip(act) {
+    const base = WEAPON_TIP_BASE[act];
+    if (!sel || sel.faction !== 'blue' || !sel.type) return base;
+    const R = sel.type.range | 0;
+    if (R < 1 || !canDo(act)) return base;
+    switch (act) {
+      case 'attack':
+        return `Direct fire [T] — range ${hexN(R)}, needs a spotted target ` +
+          '(line of sight).';
+      case 'artillery':
+        return `Indirect artillery [R] — range ${hexN(R)}; needs a spotted ` +
+          'target for full effect; blind fire is weak.';
+      case 'fpv':
+        return `FPV strike [F] — range ${hexN(R)}; top attack, strong vs ` +
+          'armour; can be jammed by EW or shot down by AA. Consumes an airframe.';
+      case 'loiter':
+        return `Loitering munition [L] — range ${hexN(R)}; circles and dives; ` +
+          'the only weapon that can destroy infrastructure at distance.';
+      default:
+        return base;
+    }
+  }
+
   function renderActions() {
+    const movedSel = !!(sel && sel.alive && sel.faction === 'blue' && sel.moved);
     for (const btn of elActs) {
       const act = btn.dataset.act;
       btn.disabled = !canDo(act);
       btn.classList.toggle('active', mode === act);
+      if (act === 'move') {
+        btn.classList.toggle('used', movedSel);
+        btn.setAttribute('data-tip', movedSel ? MOVE_TIP_USED : MOVE_TIP_FRESH);
+      } else if (WEAPON_TIP_BASE[act]) {
+        const tip = weaponTip(act);
+        if (btn.getAttribute('data-tip') !== tip) btn.setAttribute('data-tip', tip);
+      }
     }
     elEndTurn.disabled = Game.side !== 'blue' || Game.phase === 'over';
   }
@@ -870,9 +997,13 @@ export function initHUD(Game, deps = {}) {
       if (reach.length && terrain) terrain.highlightHexes(reach, 'move');
     } else if (m === 'attack') {
       targets = arr(() => Game.attackableTargets(sel));
+      // ITEM 4 honesty: the no-target fallback used to light the FULL range
+      // ring, sight or no sight — implying hexes the unit could not legally
+      // engage. Direct fire is spotting-limited (state.js attackableTargets),
+      // so the fallback is clipped to what BLUE can currently see.
       const hexes = targets.length
         ? targets.map((t) => t.hex).filter(Boolean)
-        : rangeHexes(sel, 1, (sel.type && sel.type.range) || 1);
+        : rangeHexes(sel, 1, (sel.type && sel.type.range) || 1).filter(visibleHex);
       targetSet = keySet(hexes);
       if (hexes.length && terrain) terrain.highlightHexes(hexes, 'attack');
     } else {
@@ -987,6 +1118,49 @@ export function initHUD(Game, deps = {}) {
 
   /* ---- hex click routing ------------------------------------------------ */
 
+  // PLAYER-FEEDBACK ROUND — clicking a destination with a unit that has already
+  // moved used to be pure silence, which read as a bug ("it is still green, but
+  // I cannot move it again"). Every such click now answers with a toast and a
+  // comms-log line naming the rule. Throttled: a frustrated double-click is one
+  // explanation, not two.
+  let movedNoteAt = 0;
+
+  function noteAlreadyMoved() {
+    if (!sel) return;
+    const now = performance.now();
+    if (now - movedNoteAt < 1500) return;
+    movedNoteAt = now;
+    const name = (sel.type && sel.type.name) || String(sel.typeId || 'Unit');
+    const canFire = canDo('attack') || canDo('artillery') ||
+      canDo('fpv') || canDo('loiter');
+    if (canFire) {
+      toast('ALREADY MOVED — CAN STILL FIRE', 'warn');
+      pushLog(`${name} has already moved. Move and fire are separate actions — it can still fire this turn.`);
+    } else if (sel.fired) {
+      toast('UNIT SPENT — MOVED AND FIRED', 'warn');
+      pushLog(`${name} has already moved and fired — no actions left this turn.`);
+    } else {
+      toast('ALREADY MOVED THIS TURN', 'warn');
+      pushLog(`${name} has already moved this turn.`);
+    }
+  }
+
+  // GAMEPLAY ROUND 2, ITEM 4 — "I often did not quite understand how far units
+  // can shoot." Half of the answer is the always-on envelope boundary
+  // (fx/markers.js); this is the other half: a rejected click in a targeting
+  // mode now NAMES its reason instead of doing nothing. Same 1.4 s throttle
+  // discipline as noteAlreadyMoved — a frustrated double-click is one
+  // explanation, not two.
+  let denyNoteAt = 0;
+
+  function noteDenied(short, logLine) {
+    const now = performance.now();
+    if (now - denyNoteAt < 1400) return;
+    denyNoteAt = now;
+    toast(short, 'warn');
+    if (logLine) pushLog(logLine);
+  }
+
   function onHexClick(hex) {
     if (overlayOpen() || busy || fpvActive ||
         Game.side !== 'blue' || Game.phase === 'over') return;
@@ -997,21 +1171,66 @@ export function initHUD(Game, deps = {}) {
     if (targeting && sel) {
       if (u && u.faction === 'blue') { selectUnit(u); return; }
       const key = `${hex.q},${hex.r}`;
-      if (targetSet && targetSet.size && !targetSet.has(key)) return;
+      const st = sel.type || {};
+      const R = st.range || 1;
+      const d = hexDistance(sel.hex, hex);
+      const selName = st.name || String(sel.typeId || 'Unit');
+      if (targetSet && targetSet.size && !targetSet.has(key)) {
+        // Ground click outside the weapon envelope while the unit has already
+        // moved: this is almost always an attempted second move. Say so.
+        if (sel.moved && !u && d > R) { noteAlreadyMoved(); return; }
+        // ITEM 4 — otherwise say WHY the hex is not a legal target.
+        const maxAmmo = st.ammo | 0;
+        if (maxAmmo > 0 && sel.ammo <= 0) {
+          noteDenied('OUT OF AMMO — RESUPPLY AT A TRUCK',
+            `${selName}: out of ammo — hold beside a supply truck to rearm.`);
+        } else if (d > R) {
+          noteDenied(`OUT OF RANGE — RNG ${R}`,
+            `${selName}: that hex is ${d} hexes out — weapon range is ${R}.`);
+        } else if (mode === 'attack' && !visibleHex(hex)) {
+          noteDenied('NO LINE OF SIGHT — NOT SPOTTED',
+            `${selName}: no line of sight — nothing is spotted on that hex.`);
+        } else if (mode === 'attack' && u) {
+          noteDenied(u.typeId === 'recon_drone'
+            ? 'ONLY SHORAD CAN ENGAGE AIR' : 'NO WEAPON EFFECT VS TARGET',
+            `${selName} cannot engage that target class.`);
+        } else if (mode === 'attack') {
+          noteDenied('NO TARGET — NEEDS A SPOTTED ENEMY',
+            `${selName}: direct fire needs a spotted enemy unit on the hex.`);
+        }
+        return;
+      }
       if (mode === 'attack') {
         const t = targets.find((x) => x.hex && x.hex.q === hex.q && x.hex.r === hex.r) ||
           (u && u.faction !== 'blue' ? u : null);
-        if (t) orderAttack(t);
+        if (t) { orderAttack(t); return; }
+        // In-envelope hex with no engageable target (ITEM 4): explain.
+        if (u && u.faction !== 'blue') {
+          noteDenied(u.typeId === 'recon_drone'
+            ? 'ONLY SHORAD CAN ENGAGE AIR' : 'NO WEAPON EFFECT VS TARGET',
+            `${selName} cannot engage that target class.`);
+        } else {
+          noteDenied('NO TARGET — NEEDS A SPOTTED ENEMY',
+            `${selName}: direct fire needs a spotted enemy unit on the hex.`);
+        }
         return;
       }
       if (mode === 'artillery') { orderArtillery(hex); return; }
       if (mode === 'fpv') {
         if (u && u.faction !== 'blue') orderStrike(u, 'fpv');
+        else {
+          noteDenied('NO TARGET — NEEDS A SPOTTED ENEMY',
+            `${selName}: an FPV strike needs a spotted enemy unit, not open ground.`);
+        }
         return;
       }
       if (mode === 'loiter') {
         const target = (u && u.faction !== 'blue') ? u : infraAt(hex);
         if (target) orderStrike(target, 'loiter');
+        else {
+          noteDenied('NO TARGET — UNIT OR INFRASTRUCTURE',
+            `${selName}: loitering munitions need an enemy unit or infrastructure.`);
+        }
         return;
       }
       return;
@@ -1024,6 +1243,13 @@ export function initHUD(Game, deps = {}) {
 
     if (sel && sel.faction === 'blue' && mode === 'move') {
       if (targetSet && targetSet.has(`${hex.q},${hex.r}`)) { orderMove(hex); return; }
+    }
+    // A fully spent unit (mode 'none') clicking open ground: keep the selection
+    // and explain, rather than silently deselecting — the old behaviour looked
+    // like the order was simply ignored.
+    if (sel && sel.faction === 'blue' && sel.moved && mode === 'none' && !u) {
+      noteAlreadyMoved();
+      return;
     }
     deselect();
   }
@@ -2620,6 +2846,16 @@ export function initHUD(Game, deps = {}) {
   });
 
   Game.on('entrench', () => refreshRoster());
+
+  // GAMEPLAY ROUND contract (state.js): `_supplyTick` announces every unit it
+  // touches. The per-unit comms-log line arrives on the normal 'log' path; this
+  // handler is the glance-level half — ammo pips, hp bars and the card catch up
+  // immediately instead of on the next unrelated repaint.
+  Game.on('unitResupplied', (p) => {
+    const u = p && p.unit;
+    refreshRoster();
+    if (sel && u && sel.id === u.id) renderCard();
+  });
 
   // The sector map's fog is a cached composite; these are exactly the four
   // events game/fog.js recomputes its visible sets on, and fog.js registers its

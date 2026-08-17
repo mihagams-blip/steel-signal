@@ -18,6 +18,20 @@ const SQRT3 = Math.sqrt(3);
 
 export const HEX = { size: 6, w: 12, h: 6 * SQRT3 };
 
+// FEEDBACK ROUND 2, item 3 — the tactical grid stamp and the hex fan that
+// samples it share one mapping, so both read these:
+//   GRID_HALF_W — the alpha ramp's half-width in WORLD units (was the local
+//     GRID_HALF; hoisted so the stamp painter can derive its pixel ramp from
+//     the same number instead of hard-coding 5 px).
+//   GRID_UV_PAD — the stamp canvas now spans PAD × the hex circumradius, so
+//     the hex corners land at UV 0.5 ± 0.4 instead of ON the canvas border.
+//     Without the pad, the corner texels sat on the clamp edge and mip/aniso
+//     filtering smeared their ink along the fan's outer edge — one of the
+//     "lines that go over the edges" the player reported. All ink now dies
+//     ≥ 1 world unit before the canvas border (asserted offline).
+const GRID_HALF_W = 0.2344;
+const GRID_UV_PAD = 1.25;
+
 // ---------------------------------------------------------------- hex math
 // Flat-top axial: +q steps east-ish (x + 1.5·size), +r steps south (z + √3·size).
 
@@ -1289,18 +1303,36 @@ export function createTerrain(scene, scenario) {
     }
   }
 
+  // A bridge deck is a SEPARATE mesh built by features.js; the height field
+  // underneath it is the carved river channel, several units below the water
+  // plane. Everything that asks the world "how high is the ground here" —
+  // unit placement, raycastHex's ray-march, the road ribbon — was getting the
+  // riverbed, so units on a bridge sank under the water, the road appeared to
+  // dive into the channel and cross the deck, and a click on the visible deck
+  // resolved to whatever hex the ray reached down at riverbed level. One cause,
+  // three symptoms. features.js owns the deck geometry and therefore the only
+  // authoritative deck height, so it installs its blend here once the decks are
+  // built; until then this is a no-op and the field behaves exactly as before.
+  let deckHook = null;
+  function setDeckHook(fn) { deckHook = typeof fn === 'function' ? fn : null; }
+
   function heightAt(x, z) {
     const fx = (x - gx0) / CELL, fz = (z - gz0) / CELL;
     if (!(fx > -1e6) || !(fz > -1e6)) return 0;         // NaN guard
     const i = Math.floor(fx), j = Math.floor(fz);
-    if (i < 0 || j < 0 || i >= NX || j >= NZ) return shapedHeight(x, z);
-    const tx = fx - i, tz = fz - j;
-    const s = NX + 1;
-    const h00 = heights[j * s + i], h10 = heights[j * s + i + 1];
-    const h01 = heights[(j + 1) * s + i], h11 = heights[(j + 1) * s + i + 1];
-    const a = h00 + (h10 - h00) * tx;
-    const b = h01 + (h11 - h01) * tx;
-    return a + (b - a) * tz;
+    let y;
+    if (i < 0 || j < 0 || i >= NX || j >= NZ) {
+      y = shapedHeight(x, z);
+    } else {
+      const tx = fx - i, tz = fz - j;
+      const s = NX + 1;
+      const h00 = heights[j * s + i], h10 = heights[j * s + i + 1];
+      const h01 = heights[(j + 1) * s + i], h11 = heights[(j + 1) * s + i + 1];
+      const a = h00 + (h10 - h00) * tx;
+      const b = h01 + (h11 - h01) * tx;
+      y = a + (b - a) * tz;
+    }
+    return deckHook ? deckHook(x, z, y) : y;
   }
 
   function slopeAt(x, z) {
@@ -1603,14 +1635,29 @@ export function createTerrain(scene, scenario) {
   }
 
   const roads = [];
+  // FEEDBACK ROUND 2, item 1 ("roads end in the middle of nowhere") — the road
+  // family now has three kinds with different obligations:
+  //   paved / dirt — GRADED roads. They join the network: every chain endpoint
+  //     must land on the map edge, a settlement, a bridge, an infrastructure
+  //     site or another chain (audited and repaired below).
+  //   track — a WORN FARM LANE (two wheel ruts, features.js draws it with the
+  //     farm-lane texture, not the graded-road ribbon). A lane may legitimately
+  //     peter out in a field, so it carries none of the graded obligations, and
+  //     it does NOT join roadKeys: no tile flips to type 'road' (no 0.5 move
+  //     cost, no gravel splat band) under what is visually two ruts in crop.
+  const trackKeys = new Set();
   function addRoad(kind, hexes) {
     const clean = [];
     for (const t of hexes) {
       if (!t) continue;
       if (clean.length && clean[clean.length - 1] === t) continue;
       clean.push(t);
-      roadKeys.add(key(t.q, t.r));
-      if (kind === 'paved') pavedKeys.add(key(t.q, t.r));
+      if (kind === 'track') {
+        trackKeys.add(key(t.q, t.r));
+      } else {
+        roadKeys.add(key(t.q, t.r));
+        if (kind === 'paved') pavedKeys.add(key(t.q, t.r));
+      }
     }
     if (clean.length > 1) roads.push({ kind, hexes: clean });
     return clean;
@@ -1682,15 +1729,103 @@ export function createTerrain(scene, scenario) {
         const t = get(worldToHex(p.x, p.z));
         if (t && (!chain.length || chain[chain.length - 1] !== t)) chain.push(t);
       }
-      // keep only long runs that never touch the channel or a settlement
+      // keep only long runs that never touch the channel or a settlement.
+      // FEEDBACK R2 item 1: these are the runs that used to be added as kind
+      // 'dirt' and rendered as graded roads dying mid-field. They are farm
+      // lanes, so they are now kind 'track' — drawn as worn wheel ruts, allowed
+      // to end at a field, and no longer flipping tiles to type 'road'.
       let run = [];
-      const flush = () => { if (run.length >= 5) addRoad('dirt', run); run = []; };
+      const flush = () => { if (run.length >= 5) addRoad('track', run); run = []; };
       for (const t of chain) {
         const k = key(t.q, t.r);
         if (isWater(t) || usedInfraHex.has(k)) { flush(); continue; }
         run.push(t);
       }
       flush();
+    }
+  }
+
+  // -------------------------------------- graded-road endpoint audit
+  // FEEDBACK ROUND 2, item 1 — "roads end in the middle of nowhere". Invariant
+  // enforced here, at layout time, for ANY map dims/seed: every endpoint of a
+  // graded (paved/dirt) chain must classify as map edge / bridge / settlement /
+  // infrastructure / junction-with-another-chain. A dangling endpoint is first
+  // EXTENDED (A* to the nearest anchor hex — the same A* the network was built
+  // with, so the repair rides existing roads where it can); if no path exists
+  // it is TRIMMED back to the last classifiable hex, and a chain that trims
+  // below 2 hexes is dropped. Farm tracks (kind 'track') are exempt: a worn
+  // lane fading into a field is the realistic case, and features.js draws them
+  // as ruts, not as a graded ribbon. Deterministic — no R() anywhere.
+  {
+    const settlementKeys = new Set();
+    for (const s of settlements) for (const t of s.hexes) settlementKeys.add(key(t.q, t.r));
+    const atMapEdge = (t) => {
+      for (const n of hexNeighbors(t)) if (!get(n)) return true;
+      return false;
+    };
+    const graded = () => roads.filter((rd) => rd.kind !== 'track');
+    const netKeysExcept = (self) => {
+      const set = new Set();
+      for (const rd of graded()) {
+        if (rd === self) continue;
+        for (const h of rd.hexes) set.add(key(h.q, h.r));
+      }
+      return set;
+    };
+    const classify = (t, others) => {
+      const k = key(t.q, t.r);
+      if (atMapEdge(t)) return 'edge';
+      if (bridgeHexKeys.has(k)) return 'bridge';
+      if (settlementKeys.has(k)) return 'settlement';
+      if (usedInfraHex.has(k)) return 'infra';
+      if (others.has(k)) return 'junction';
+      return null;
+    };
+    for (const rd of [...roads]) {
+      if (rd.kind === 'track') continue;
+      for (const end of [0, 1]) {
+        const others = netKeysExcept(rd);
+        const ep = () => (end === 0 ? rd.hexes[0] : rd.hexes[rd.hexes.length - 1]);
+        if (classify(ep(), others)) continue;
+        // nearest anchor hex that would classify this endpoint
+        let target = null, bd = Infinity;
+        for (const u of order) {
+          if (isWater(u)) continue;
+          if (!classify(u, others)) continue;
+          const d = hexDistance(u, ep());
+          if (d > 0 && d < bd) { bd = d; target = u; }
+        }
+        const path = target ? astar(ep(), target) : [];
+        if (path.length > 1) {
+          // splice the repair onto the dangling end and claim its hexes
+          const add = path.slice(1);
+          for (const t of add) {
+            roadKeys.add(key(t.q, t.r));
+            if (rd.kind === 'paved') pavedKeys.add(key(t.q, t.r));
+          }
+          if (end === 0) rd.hexes.unshift(...add.reverse());
+          else rd.hexes.push(...add);
+        } else {
+          // no route out — trim back to the last hex that classifies
+          while (rd.hexes.length > 1 && !classify(ep(), others)) {
+            if (end === 0) rd.hexes.shift(); else rd.hexes.pop();
+          }
+        }
+      }
+    }
+    // drop degenerate chains, then rebuild the key sets from what survived so
+    // the tile classifier and the forest pass below see the repaired network
+    for (let i = roads.length - 1; i >= 0; i--) {
+      if (roads[i].kind !== 'track' && roads[i].hexes.length < 2) roads.splice(i, 1);
+    }
+    roadKeys.clear();
+    pavedKeys.clear();
+    for (const rd of roads) {
+      if (rd.kind === 'track') continue;
+      for (const t of rd.hexes) {
+        roadKeys.add(key(t.q, t.r));
+        if (rd.kind === 'paved') pavedKeys.add(key(t.q, t.r));
+      }
     }
   }
 
@@ -1703,7 +1838,9 @@ export function createTerrain(scene, scenario) {
   }
   for (const t of order) {
     const k = key(t.q, t.r);
-    if (isWater(t) || roadKeys.has(k) || usedInfraHex.has(k)) continue;
+    // trackKeys too: a poplar standing in the middle of a farm lane would cut
+    // the one continuous line the lane is there to draw (FEEDBACK R2 item 1)
+    if (isWater(t) || roadKeys.has(k) || trackKeys.has(k) || usedInfraHex.has(k)) continue;
     if (settlements.some((s) => s.hexes.includes(t))) continue;
     if (riverDist(t.x, t.z) < riverHalfW(t.z) + 6) continue;
     // PHASE 2: ask the splat where the seam is instead of re-deriving it from a
@@ -3151,8 +3288,10 @@ export function createTerrain(scene, scenario) {
         overPos[vi * 3] = px;
         overPos[vi * 3 + 1] = heightAt(px, pz) + OVER_LIFT;
         overPos[vi * 3 + 2] = pz;
-        overUv[vi * 2] = 0.5 + ring[i][0] / (2 * S);
-        overUv[vi * 2 + 1] = 0.5 + ring[i][1] / (2 * S);
+        // GRID_UV_PAD: the stamp canvas is padded past the corners, so the fan
+        // maps the hex into the middle 1/PAD of UV (see makeGridTexture)
+        overUv[vi * 2] = 0.5 + ring[i][0] / (2 * S * GRID_UV_PAD);
+        overUv[vi * 2 + 1] = 0.5 + ring[i][1] / (2 * S * GRID_UV_PAD);
         const sh = groundShade(px, pz);
         overShade[vi] = sh;
         overShadeRGB[vi * 3] = sh; overShadeRGB[vi * 3 + 1] = sh; overShadeRGB[vi * 3 + 2] = sh;
@@ -3230,7 +3369,7 @@ export function createTerrain(scene, scenario) {
   // half-width GRID_HALF·uGridW. Solving uGridW against the actual pixels-per-
   // world-unit each frame holds the line at ~1.55 px from 260 units down to 15.
   // The smoothstep also gives it a free half-pixel feather, so it never crawls.
-  const GRID_HALF = 0.2344;             // stamp ramp half-width, world units
+  const GRID_HALF = GRID_HALF_W;        // stamp ramp half-width, world units
   const GRID_PX = 1.55;                 // target on-screen width
   const gridW = { value: 0.45 };
   const gridMat = new THREE.MeshBasicMaterial({
@@ -3373,7 +3512,8 @@ export function createTerrain(scene, scenario) {
   group.add(outline);
 
   const olSet = new Set();              // "q,r" keys currently outlined
-  const olSegs = [];                    // flat [ax, az, bx, bz, nx, nz] per edge
+  const olSegs = [];        // flat [ax, az, bx, bz, nx, nz, j0, j1] per edge
+                            // (j0/j1 = mitre joint sign at each corner, R2 item 3)
   let olWidth = 0.40;                   // world units, re-solved per zoom
 
   function buildOutlineSegments() {
@@ -3385,56 +3525,90 @@ export function createTerrain(scene, scenario) {
       for (let i = 0; i < 6; i++) {
         const nb = EDGE_NB[i];
         if (olSet.has(key(t.q + nb[0], t.r + nb[1]))) continue;
-        if (olSegs.length >= OL_MAX_SEG * 6) return;
+        if (olSegs.length >= OL_MAX_SEG * 8) return;
         const a = (Math.PI / 3) * (i + 0.5);
         const j = (i + 1) % 6;
+        // FEEDBACK R2 item 3 — joint type at each corner, decided here where
+        // the set is known. Corner i is shared with the neighbour across edge
+        // i−1, corner i+1 with the neighbour across edge i+1. Third hex in the
+        // set ⇒ the outline turns AROUND it (interior angle 240°, concave,
+        // sign +1 = the inset flanks reach their mitre BEYOND the corner);
+        // out of the set (or off-map) ⇒ the outline hugs this hex (120°,
+        // convex, sign −1 = the inset flanks cross BEFORE the corner and must
+        // be trimmed). ribbonOutline turns the sign into an exact mitre.
+        const p0 = EDGE_NB[(i + 5) % 6];
+        const p1 = EDGE_NB[(i + 1) % 6];
+        const j0 = olSet.has(key(t.q + p0[0], t.r + p0[1])) ? 1 : -1;
+        const j1 = olSet.has(key(t.q + p1[0], t.r + p1[1])) ? 1 : -1;
         olSegs.push(
           t.x + HEX_CORNER[i][0] * S, t.z + HEX_CORNER[i][1] * S,
           t.x + HEX_CORNER[j][0] * S, t.z + HEX_CORNER[j][1] * S,
-          Math.cos(a), Math.sin(a));
+          Math.cos(a), Math.sin(a), j0, j1);
       }
     }
   }
 
   function ribbonOutline(w) {
-    const half = w * 0.5;
-    const push = half + OL_INSET;
-    // Consecutive boundary edges meet at a 120° hex corner. After the inward
-    // push each endpoint falls short of the true mitre point by push·tan(30°),
-    // so every span is extended by exactly that plus a quarter stroke width —
-    // enough to close the joint, little enough that a convex corner does not
-    // grow a spike. Cheaper and more robust than a real mitre pass, and at
-    // these widths the difference is sub-pixel.
-    const ext = push * 0.5774 + w * 0.28;
+    // FEEDBACK ROUND 2, item 3 — "hexagon edges have these lines that go over
+    // the edges". Consecutive boundary edges meet at hex corners at exactly two
+    // angles, and the mitre of an inward-inset line is exact in both (derived
+    // by intersecting the two offset lines; verified numerically offline):
+    //   convex  (third hex at the corner OUTSIDE the set, interior 120°): the
+    //           inset flanks CROSS o·tan 30° BEFORE the corner foot — TRIM;
+    //   concave (third hex INSIDE the set, interior 240°): the flanks reach
+    //           their mitre o·tan 30° BEYOND the corner foot — EXTEND. Both
+    //           mitre points land on the corner's interior bisector, which for
+    //           a hex-set boundary is the shared INTERIOR hex edge, so the
+    //           joint stays inside the region by construction.
+    // The old pass EXTENDED every endpoint by push·tan 30° + w·0.28 regardless
+    // of joint type — the exact inverse of the convex truth (its own comment
+    // believed the endpoints "fall short"; they overshoot). Every stroke
+    // therefore ran ≈ 2·push·tan 30° + w·0.28 past its convex mitre (measured
+    // offline: 0.20 u outside the region at w = 0.40, 0.61 u at w = 1.24) and
+    // poked crossing ticks over every corner — the glitch the player saw.
+    // Each flank now lands exactly on its own mitre point per joint sign
+    // (j0/j1 from buildOutlineSegments): joints close watertight (max residual
+    // gap 0 to fp precision) and the whole ribbon stays inside the highlighted
+    // region, touching it only where a concave mitre meets an interior edge.
+    const TAN30 = 0.57735027;
+    const oR = OL_INSET;              // rim-side flank inset from the hex edge
+    const oI = OL_INSET + w;          // inner flank inset
     let q = 0;
-    for (let s = 0; s + 5 < olSegs.length; s += 6) {
+    for (let s = 0; s + 7 < olSegs.length; s += 8) {
       if (q + OL_SPANS > OL_QUADS) break;
+      const ax = olSegs[s], az = olSegs[s + 1];
+      const bx = olSegs[s + 2], bz = olSegs[s + 3];
       const nx = olSegs[s + 4], nz = olSegs[s + 5];
-      let ax = olSegs[s] - nx * push, az = olSegs[s + 1] - nz * push;
-      const bx = olSegs[s + 2] - nx * push, bz = olSegs[s + 3] - nz * push;
+      const j0 = olSegs[s + 6], j1 = olSegs[s + 7];
       let dx = bx - ax, dz = bz - az;
       const len = Math.hypot(dx, dz) || 1;
       dx /= len; dz /= len;
-      ax -= dx * ext; az -= dz * ext;
-      const total = len + ext * 2;
-      const hx = nx * half, hz = nz * half;
+      const eR0 = j0 * oR * TAN30, eR1 = j1 * oR * TAN30;
+      const eI0 = j0 * oI * TAN30, eI1 = j1 * oI * TAN30;
+      const rAx = ax - nx * oR - dx * eR0, rAz = az - nz * oR - dz * eR0;
+      const rBx = bx - nx * oR + dx * eR1, rBz = bz - nz * oR + dz * eR1;
+      const iAx = ax - nx * oI - dx * eI0, iAz = az - nz * oI - dz * eI0;
+      const iBx = bx - nx * oI + dx * eI1, iBz = bz - nz * oI + dz * eI1;
       for (let sp = 0; sp < OL_SPANS; sp++) {
-        const t0 = (total * sp) / OL_SPANS, t1 = (total * (sp + 1)) / OL_SPANS;
-        const p0x = ax + dx * t0, p0z = az + dz * t0;
-        const p1x = ax + dx * t1, p1z = az + dz * t1;
-        const sh = groundShade((p0x + p1x) * 0.5, (p0z + p1z) * 0.5);
+        const f0 = sp / OL_SPANS, f1 = (sp + 1) / OL_SPANS;
+        const i0x = iAx + (iBx - iAx) * f0, i0z = iAz + (iBz - iAz) * f0;
+        const i1x = iAx + (iBx - iAx) * f1, i1z = iAz + (iBz - iAz) * f1;
+        const r0x = rAx + (rBx - rAx) * f0, r0z = rAz + (rBz - rAz) * f0;
+        const r1x = rAx + (rBx - rAx) * f1, r1z = rAz + (rBz - rAz) * f1;
+        const sh = groundShade(
+          (i0x + i1x + r0x + r1x) * 0.25, (i0z + i1z + r0z + r1z) * 0.25);
         let o = q * 12;
-        olPos[o] = p0x - hx; olPos[o + 2] = p0z - hz;
-        olPos[o + 1] = heightAt(olPos[o], olPos[o + 2]) + OL_LIFT;
+        olPos[o] = i0x; olPos[o + 2] = i0z;
+        olPos[o + 1] = heightAt(i0x, i0z) + OL_LIFT;
         o += 3;
-        olPos[o] = p1x - hx; olPos[o + 2] = p1z - hz;
-        olPos[o + 1] = heightAt(olPos[o], olPos[o + 2]) + OL_LIFT;
+        olPos[o] = i1x; olPos[o + 2] = i1z;
+        olPos[o + 1] = heightAt(i1x, i1z) + OL_LIFT;
         o += 3;
-        olPos[o] = p1x + hx; olPos[o + 2] = p1z + hz;
-        olPos[o + 1] = heightAt(olPos[o], olPos[o + 2]) + OL_LIFT;
+        olPos[o] = r1x; olPos[o + 2] = r1z;
+        olPos[o + 1] = heightAt(r1x, r1z) + OL_LIFT;
         o += 3;
-        olPos[o] = p0x + hx; olPos[o + 2] = p0z + hz;
-        olPos[o + 1] = heightAt(olPos[o], olPos[o + 2]) + OL_LIFT;
+        olPos[o] = r0x; olPos[o + 2] = r0z;
+        olPos[o + 1] = heightAt(r0x, r0z) + OL_LIFT;
         for (let c = q * 12, e = c + 12; c < e; c++) olCol[c] = sh;
         q++;
       }
@@ -3907,6 +4081,7 @@ export function createTerrain(scene, scenario) {
     cols, rows,
 
     heightAt,
+    setDeckHook,
     slopeAt,
     tileAt(a, b) {
       if (a && typeof a === 'object') return tiles.get(key(a.q, a.r)) || null;
@@ -4023,8 +4198,9 @@ function makeScorchTexture() {
 // Tactical grid stamp — CRITIQUE fix 16.
 // ONE colour, carried by the material (0xD8D2C4 @ 0.22); the canvas is pure
 // white and stores nothing but an alpha profile. The overlay geometry maps the
-// hex circumradius (6 world units) onto half of UV, so at S = 256 one world
-// unit is 21.3 px. The line is authored at ~0.30 world units (≈6.4 px here),
+// hex circumradius (6 world units) onto 1/(2·GRID_UV_PAD) of UV, so at S = 256
+// one world unit is 17.1 px and the canvas keeps an empty padding border past
+// the corners (feedback R2 item 3). The line is ~0.47 world units of ramp,
 // which lands at ~1.5 px on a 1080p frame at the default 185-unit camera, with
 // a ~0.5 px feather either side — a hard-edged 1 px hex line crawls and
 // stair-steps on every diagonal run, which is the aliasing the critique saw.
@@ -4047,13 +4223,24 @@ function makeGridTexture() {
   // The ramp peaks exactly ON the hex edge, and the overlay geometry clips each
   // stamp to its own hexagon, so two neighbouring tiles each contribute one
   // half of the line and it joins seamlessly.
+  // FEEDBACK ROUND 2, item 3 — padded stamp. The canvas used to span exactly
+  // the circumcircle, which put the two east/west hex corners ON the clamp
+  // border: any mip/anisotropic footprint reaching past UV 1 re-read the bright
+  // corner texels and smeared ink along the fan's outer edge. The canvas now
+  // spans GRID_UV_PAD × that (the fan maps the hex into the middle 1/PAD of
+  // UV — see the overUv write), so every corner keeps S·(1−1/PAD)/2 ≈ 26 px of
+  // guaranteed-empty border and the clamp edge is always alpha 0. The ramp
+  // half-width in PIXELS is derived from GRID_HALF_W so the on-screen width
+  // solve in grid.onBeforeRender is unchanged.
   const S = 256;
   const c = document.createElement('canvas');
   c.width = c.height = S;
   const g = c.getContext('2d');
   const cxp = S / 2, czp = S / 2;
-  const RI = (S / 2) * (SQRT3 / 2);       // hex inradius in stamp pixels
-  const HALF_PX = 5.0;                    // ramp half-width = 0.234 world units
+  const PX_PER_WORLD = S / (2 * HEX.size * GRID_UV_PAD);  // 17.07 px per unit
+  const RI = HEX.size * (SQRT3 / 2) * PX_PER_WORLD;       // hex inradius, px
+  const HALF_PX = GRID_HALF_W * PX_PER_WORLD;             // ramp half-width, px
+  const FID_R = 0.075 * PX_PER_WORLD;    // centre fiducial ring, world-sized
   const img = g.createImageData(S, S);
   const d = img.data;
   for (let y = 0; y < S; y++) {
@@ -4068,7 +4255,7 @@ function makeGridTexture() {
       let a = 1 - Math.abs(RI - m) / HALF_PX;
       // centre fiducial: a survey mark that survives any threshold, but tiny.
       const rc = Math.sqrt(px * px + py * py);
-      const fid = 1 - Math.abs(rc - 1.6) / 1.6;
+      const fid = 1 - Math.abs(rc - FID_R) / FID_R;
       if (fid > a) a = fid;
       if (a <= 0) continue;
       const o = (y * S + x) * 4;

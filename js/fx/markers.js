@@ -55,7 +55,13 @@
 // Export: initMarkers(engine, Game) -> { dispose() }
 
 import * as THREE from 'three';
-import { HEX, camGroundDistance } from '../world/terrain.js';
+import { HEX, camGroundDistance, hexToWorld, hexDistance } from '../world/terrain.js';
+// GAMEPLAY ROUND 2, item 4 (weapon-range legibility): the envelope boundary is
+// clipped by what BLUE can actually see for direct-fire units, and the fog
+// module is the single source of that truth. ui/hud.js already imports fog.js
+// for the same reason; fx/ taking the same read keeps the two layers honest
+// against the same set.
+import { isVisibleTo } from '../game/fog.js';
 
 // ---------------------------------------------------------------- palette
 
@@ -1147,6 +1153,19 @@ export function initMarkers(engine, Game) {
   });
   const mats = { blue: ringMat('blue'), red: ringMat('red') };
 
+  // PLAYER-FEEDBACK ROUND — "when I move a unit it is still green". A unit that
+  // has BOTH moved and fired kept a full-strength faction ring (only the badge
+  // dimmed to 0.60 and the ring scaled 0.88 — neither survives a glance), so
+  // "green = can act" was a lie for half of every turn. Spent units now swap to
+  // this second material pair, driven by the SAME camera solve as the live pair
+  // but at SPENT_RING_K of its opacity and a duller value, so the honest read
+  // at any range is: bright ring = still has an action, faint ring = done.
+  // MODEL PREDICTION: 0.35 × the solved opacity keeps the ring findable (the
+  // badge still marks the unit) while being unmistakably quieter than live.
+  const spentMats = { blue: ringMat('blue'), red: ringMat('red') };
+  const SPENT_RING_K = 0.35;
+  const SPENT_RING_V = 0.78;   // value multiplier on the solved brightness
+
   // ---- ROUND-3 FIX 17: conform the rings to the ground -------------------
   // A ring is a flat quad at y 0.18 with ~0.2 u of polygon-offset headroom. On
   // the plate that shipped in round 1 that was invisibly correct; on the 30.97 u
@@ -1191,6 +1210,183 @@ export function initMarkers(engine, Game) {
     const nx = -dx, nz = -dz;
     _norm.set(nx * c - nz * s, 1, nx * s + nz * c).normalize();
     mesh.quaternion.setFromUnitVectors(_up, _norm);
+  }
+
+  // ====================================================================
+  // GAMEPLAY ROUND 2, ITEM 4 — the weapon-range envelope boundary
+  // ====================================================================
+  // Player verdict: "I often did not quite understand how far units can
+  // shoot." Range existed as a number on the card and as highlight hexes AFTER
+  // entering a targeting mode; on plain selection there was nothing. This is
+  // the missing read: whenever a BLUE unit with a weapon is selected, a thin
+  // enemy-red line is drawn along the OUTER EDGE of every hex the weapon can
+  // reach, alongside (never instead of) the mint move field the terrain
+  // overlay already paints.
+  //
+  // Why it lives HERE and not in terrain.highlightHexes({ add: true }): the
+  // tactical overlay's perimeter ribbon is one geometry with ONE material
+  // colour — an additive 'attack' call recolours the move boundary red for the
+  // whole set (terrain.js: `olMat.color.setHex(...)` on every call). Two
+  // simultaneous, differently-coloured boundaries need a second object, and
+  // fx/markers.js is the module that already owns in-world annotation.
+  //
+  // Honesty rules (mirrors state.js attackableTargets §1.1 exactly):
+  //   · direct fire (mbt/ifv/apc/aa/infantry/atgm): range ∩ hexes BLUE can
+  //     currently see — you cannot shoot what nobody has spotted, so unseen
+  //     pockets inside range are excluded and the boundary shows that;
+  //   · indirect (spg/mlrs) and the drone arm (fpv/loiter): full reach — blind
+  //     artillery fire is legal (weak) and drones fly to the hex;
+  //   · a unit that has fired, or is out of ammo, has NO envelope this turn —
+  //     drawing one would be the same lie the green ring used to tell.
+  // Rebuilt only on selection / move / fog change (event-driven plus a field
+  // check on the existing 0.12 s sync) — never per frame, no per-frame
+  // allocation: one preallocated buffer, setDrawRange does the sizing.
+  const RB_MAX_SEG = 4096;                 // segments; loiter R10 needs ~200
+  const RB_SUB = 3;                        // subdivisions per hex edge (relief)
+  const RB_LIFT = 0.42;                    // above the wash, below the hulls
+  const RB_DIRS = [[1, 0], [0, 1], [-1, 1], [-1, 0], [0, -1], [1, -1]];
+  const rbPos = new Float32Array(RB_MAX_SEG * 2 * 3);
+  const rbGeo = new THREE.BufferGeometry();
+  const rbAttr = new THREE.BufferAttribute(rbPos, 3);
+  rbGeo.setAttribute('position', rbAttr);
+  rbGeo.setDrawRange(0, 0);
+  // HUD --enemy #E05A4E, toneMapped:false like every marker material.
+  // The 0.62 hairline was a MODEL PREDICTION; the feedback-2 integration run
+  // MEASURED it on the live dpr-2 frame: 1 device px (0.5 CSS px) that read as
+  // one more power-line wire over sunlit steppe. GL lines cannot widen, so the
+  // main pass runs hotter (0.92) and a second pass below doubles the stroke.
+  const rbMat = new THREE.LineBasicMaterial({
+    color: 0xE05A4E,
+    transparent: true,
+    opacity: 0.92,
+    toneMapped: false,
+    depthTest: true,
+    depthWrite: false,
+    fog: true,
+  });
+  const rbLine = new THREE.LineSegments(rbGeo, rbMat);
+  rbLine.name = 'range-boundary';
+  rbLine.renderOrder = 3;
+  rbLine.frustumCulled = false;            // positions mutate; sphere would lag
+  rbLine.visible = false;
+  engine.scene.add(rbLine);
+  // Second stroke (feedback-2 integration): a child sharing rbGeo — drawRange,
+  // rebuilds and every visibility gate (rbRefresh, the FPV-feed blackout)
+  // follow the parent for free. Lifted +0.55 u so the tilted play camera
+  // spreads the pair 1–3 px vertically: one heavier stroke at the zooms where
+  // the player actually reads an envelope, converging back to a hairline at
+  // distance. No new buffer, no per-frame work.
+  const rbMatHalo = rbMat.clone();
+  rbMatHalo.opacity = 0.34;
+  const rbHalo = new THREE.LineSegments(rbGeo, rbMatHalo);
+  rbHalo.name = 'range-boundary-halo';
+  rbHalo.renderOrder = 3;
+  rbHalo.frustumCulled = false;
+  rbHalo.position.y = 0.55;
+  rbLine.add(rbHalo);
+
+  let rbUnit = null;                       // the BLUE unit whose envelope is up
+  let rbWanted = false;                    // built and non-empty (FPV feed gates draw)
+  const rbSet = new Set();                 // hex keys inside the envelope
+  // change detector for the 0.12 s tick — catches fired/ammo/hex mutations
+  // that arrive through code paths with no event (fpv/loiter strikes).
+  const rbSig = { fired: false, ammo: -1, q: 0, r: 0, turn: -1 };
+
+  const rbHeight = (x, z) => {
+    if (!heightAt) return RB_LIFT;
+    const h = heightAt(x, z);
+    return (Number.isFinite(h) ? h : 0) + RB_LIFT;
+  };
+
+  // Fill rbPos with the perimeter of rbSet; returns the segment count.
+  // A perimeter edge is any of a set-hex's six edges whose neighbour is not in
+  // the set (map-edge neighbours included, so the boundary hugs the sheet).
+  // The shared edge is perpendicular to the centre-to-centre axis at its
+  // midpoint, half-length HEX.size/2 (a regular hex's edge length equals its
+  // circumradius), which needs no corner-index bookkeeping at all.
+  function rbBuild(u) {
+    const t = u.type || {};
+    const R = t.range || 0;
+    const a = t.attack || {};
+    if (!terrainRef || !terrainRef.tiles || !u.hex || R < 1) return 0;
+    if (((a.soft || 0) + (a.hard || 0) + (a.air || 0)) <= 0) return 0;
+    if (u.fired) return 0;
+    if ((t.ammo | 0) > 0 && u.ammo <= 0) return 0;
+    const traits = t.traits || [];
+    const losLimited = !traits.includes('indirect') &&
+      u.typeId !== 'fpv_drone' && u.typeId !== 'loiter_munition';
+    rbSet.clear();
+    rbSet.add(`${u.hex.q},${u.hex.r}`);    // own hex in-set: no inner ring drawn
+    for (const [k, tile] of terrainRef.tiles) {
+      const d = hexDistance(u.hex, tile);
+      if (d < 1 || d > R) continue;
+      if (losLimited) {
+        let vis = true;
+        try { vis = isVisibleTo(tile, 'blue') !== false; } catch (err) { vis = true; }
+        if (!vis) continue;
+      }
+      rbSet.add(k);
+    }
+    if (rbSet.size < 2) return 0;
+    const half = HEX.size * 0.5;
+    let seg = 0;
+    for (const k of rbSet) {
+      const ci = k.indexOf(',');
+      const q = +k.slice(0, ci), r = +k.slice(ci + 1);
+      const c = hexToWorld(q, r);
+      for (let i = 0; i < 6 && seg < RB_MAX_SEG; i++) {
+        if (rbSet.has(`${q + RB_DIRS[i][0]},${r + RB_DIRS[i][1]}`)) continue;
+        const n = hexToWorld(q + RB_DIRS[i][0], r + RB_DIRS[i][1]);
+        const mx = (c.x + n.x) * 0.5, mz = (c.z + n.z) * 0.5;
+        let dx = n.x - c.x, dz = n.z - c.z;
+        const L = Math.hypot(dx, dz) || 1;
+        dx /= L; dz /= L;
+        const ax = mx - dz * half, az = mz + dx * half;   // edge endpoint A
+        const bx = mx + dz * half, bz = mz - dx * half;   // edge endpoint B
+        for (let sub = 0; sub < RB_SUB && seg < RB_MAX_SEG; sub++, seg++) {
+          const t0 = sub / RB_SUB, t1 = (sub + 1) / RB_SUB;
+          const x0 = ax + (bx - ax) * t0, z0 = az + (bz - az) * t0;
+          const x1 = ax + (bx - ax) * t1, z1 = az + (bz - az) * t1;
+          const o = seg * 6;
+          rbPos[o] = x0; rbPos[o + 1] = rbHeight(x0, z0); rbPos[o + 2] = z0;
+          rbPos[o + 3] = x1; rbPos[o + 4] = rbHeight(x1, z1); rbPos[o + 5] = z1;
+        }
+      }
+      if (seg >= RB_MAX_SEG) break;
+    }
+    rbAttr.needsUpdate = true;
+    rbGeo.setDrawRange(0, seg * 2);
+    return seg;
+  }
+
+  function rbRefresh() {
+    if (!rbUnit || !rbUnit.alive || rbUnit.faction !== 'blue' || !rbUnit.hex) {
+      rbWanted = false;
+      rbLine.visible = false;
+      rbGeo.setDrawRange(0, 0);
+      return;
+    }
+    let seg = 0;
+    try { seg = rbBuild(rbUnit); } catch (err) { seg = 0; }
+    rbWanted = seg > 0;
+    rbLine.visible = rbWanted;             // frame loop re-gates for the FPV feed
+    if (!rbWanted) rbGeo.setDrawRange(0, 0);   // rbBuild's refusals return early
+    rbSig.fired = !!rbUnit.fired;
+    rbSig.ammo = rbUnit.ammo | 0;
+    rbSig.q = rbUnit.hex.q; rbSig.r = rbUnit.hex.r;
+    rbSig.turn = Game.turn | 0;
+  }
+
+  // The 0.12 s half: strikes and resupply mutate fired/ammo with no dedicated
+  // event this module hears; the sync cadence already exists, so ride it.
+  function rbTick() {
+    if (!rbUnit) return;
+    if (!rbUnit.alive || !rbUnit.hex) { rbRefresh(); return; }
+    if (rbSig.fired !== !!rbUnit.fired || rbSig.ammo !== (rbUnit.ammo | 0) ||
+        rbSig.q !== rbUnit.hex.q || rbSig.r !== rbUnit.hex.r ||
+        rbSig.turn !== (Game.turn | 0)) {
+      rbRefresh();
+    }
   }
 
   const selTex = makeSelectTexture();
@@ -1398,7 +1594,8 @@ export function initMarkers(engine, Game) {
       if (!u.alive) { m.visible = false; continue; }
       m.visible = true;
       const spent = u.moved && u.fired;
-      m.material = mats[u.faction] || mats.blue;
+      m.material = spent ? (spentMats[u.faction] || spentMats.blue)
+        : (mats[u.faction] || mats.blue);
       m.scale.setScalar(spent ? 0.88 : 1);
       // ROUND-3 FIX 17 — lay it on the ground it is standing on. 0.12 s of lag
       // behind a moving hull is one frame of a 0.4 s move tween at the outside
@@ -1457,6 +1654,23 @@ export function initMarkers(engine, Game) {
       selRing.userData.unit = null;
     }
   });
+
+  // ---- item-4 envelope boundary wiring -----------------------------------
+  // Any unit's move or death can change BLUE's spotting set, and a direct-fire
+  // envelope is clipped by it — so those rebuild too, not just the selected
+  // unit's own moves. Event-driven, at most one rebuild per event; a rebuild
+  // is ~200 edges of arithmetic into a preallocated buffer.
+  Game.on('select', (u) => {
+    rbUnit = (u && u.alive && u.faction === 'blue') ? u : null;
+    rbRefresh();
+  });
+  Game.on('deselect', () => { rbUnit = null; rbRefresh(); });
+  Game.on('unitMoved', () => { if (rbUnit) rbRefresh(); });
+  Game.on('unitKilled', (u) => {
+    if (u === rbUnit) rbUnit = null;
+    rbRefresh();
+  });
+  Game.on('turnStarted', () => { if (rbUnit) rbRefresh(); });
 
   // ====================================================================
   // SCREEN-SPACE LAYOUT — round-2 critique fixes 8 and 9
@@ -2010,7 +2224,7 @@ export function initMarkers(engine, Game) {
     // that would expire every float on the resume frame.
     const sdt = dt > 0.1 ? 0.1 : (dt > 0 ? dt : 0);
     acc += dt;
-    if (acc > 0.12) { acc = 0; sync(); }        // marker state is not per-frame data
+    if (acc > 0.12) { acc = 0; sync(); rbTick(); }  // marker state is not per-frame data
 
     const cam = engine.camera;
     const seized = !!(engine.cinematic ||
@@ -2030,6 +2244,7 @@ export function initMarkers(engine, Game) {
     const u = selRing.userData.unit;
     if (seized) {
       selRing.visible = false;
+      rbLine.visible = false;              // the envelope is map furniture too
       for (let i = 0; i < counters.length; i++) {
         const mesh = counters[i].unit.mesh;
         const mk = mesh && mesh.userData ? mesh.userData.marker : null;
@@ -2037,6 +2252,7 @@ export function initMarkers(engine, Game) {
       }
       return;
     }
+    if (rbWanted && !rbLine.visible) rbLine.visible = true;   // back after the feed cuts
     for (let i = 0; i < counters.length; i++) {
       const c = counters[i];
       const mesh = c.unit.mesh;
@@ -2065,6 +2281,16 @@ export function initMarkers(engine, Game) {
       mats.red.alphaTest = at;
       mats.blue.color.setScalar(s.v);
       mats.red.color.setScalar(s.v);
+      // The spent pair tracks the same solve at a fraction of it, so a spent
+      // ring breathes with the camera exactly like a live one — just quieter.
+      const sa = s.a * SPENT_RING_K;
+      const sat = sa * s.t;
+      spentMats.blue.opacity = sa;
+      spentMats.red.opacity = sa;
+      spentMats.blue.alphaTest = sat;
+      spentMats.red.alphaTest = sat;
+      spentMats.blue.color.setScalar(s.v * SPENT_RING_V);
+      spentMats.red.color.setScalar(s.v * SPENT_RING_V);
     }
 
     if (selWanted && !selRing.visible && u && u.mesh && u.alive) selRing.visible = true;
@@ -2113,8 +2339,11 @@ export function initMarkers(engine, Game) {
       projUnits.length = 0;
       engine.scene.remove(selRing);
       selGeo.dispose(); selMat.dispose(); selTex.dispose();
+      engine.scene.remove(rbLine);
+      rbGeo.dispose(); rbMat.dispose(); rbMatHalo.dispose();
       geo.dispose();
       mats.blue.dispose(); mats.red.dispose();
+      spentMats.blue.dispose(); spentMats.red.dispose();
       texes.blue.dispose(); texes.red.dispose();
       tickTexes.blue.dispose(); tickTexes.red.dispose();
       for (const c of counters) {

@@ -18,6 +18,7 @@
 //   turnStarted({turn, side})   turnEnded({turn, side})
 //   objectiveTaken(objective)   resourcesChanged({blue, red, side, delta})
 //   entrench(unit)              gameOver(result)   log(string)
+//   unitResupplied({unit})      after §3.1 end-of-turn resupply applied
 
 import { hexDistance, hexNeighbors, hexToWorld } from '../world/terrain.js';
 import { createUnit, attachTerrain, UNIT_TYPES } from '../units/units.js';
@@ -338,6 +339,21 @@ export const Game = {
 
   visibleTo(hex, faction) {
     try { return isVisibleTo(hex, faction) !== false; } catch (_) { return true; }
+  },
+
+  /**
+   * §3.1 pre-check for the HUD: true when ending the turn RIGHT NOW would
+   * resupply `unit` (adjacent to a friendly supply truck, has not moved or
+   * fired, and would actually gain ammo or hp). Mirrors _supplyTick exactly —
+   * if this returns true, the end-of-turn tick WILL fire for this unit.
+   */
+  resupplyEligible(unit) {
+    if (!unit || !unit.alive || unit.moved || unit.fired) return false;
+    if (this.phase !== 'play') return false;
+    if (hasTrait(unit, 'supply')) return false;
+    if (!this._adjacentSupply(unit)) return false;
+    const maxAmmo = (unit.type && unit.type.ammo) || 0;
+    return (maxAmmo > 0 && unit.ammo < maxAmmo) || unit.hp < SUPPLY_HEAL_CAP;
   },
 
   /**
@@ -928,8 +944,10 @@ export const Game = {
       if (!rearmed && !healed) continue;
       if (rearmed) u.ammo = maxAmmo;
       if (healed) u.hp = Math.min(SUPPLY_HEAL_CAP, u.hp + SUPPLY_HEAL);
+      this.emit('unitResupplied', { unit: u });
       if (side === 'blue') {
-        this.emit('log', `${u.type.name} resupplied (${u.hp} hp, ${u.ammo} ammo).`);
+        this.emit('log',
+          `${u.type.name} RESUPPLIED beside the truck — ${u.hp} hp, ammo full (${u.ammo}).`);
       }
     }
   },

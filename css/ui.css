@@ -443,6 +443,19 @@ html, body {
 .tag.warn { border-color: rgba(242, 201, 76, 0.55); color: var(--warn); }
 .tag.dim { border-color: var(--panel-border); color: var(--text-dim); }
 
+/* PLAYER-FEEDBACK ROUND — one sentence of doctrine under the tags whenever a
+   specialist (FPV team, loiter battery, recon UAV, jammer, supply truck) is
+   selected. Quiet by design: it teaches, it does not alert. */
+.uc-hint {
+  margin-top: 8px;
+  padding-top: 7px;
+  border-top: 1px solid var(--panel-border);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--text-dim);
+}
+
 /* ---- Action bar (fire-control strip) ----------------------------------- */
 
 #ss-actionbar {
@@ -510,6 +523,62 @@ html, body {
   border-color: rgba(140, 160, 130, 0.26);
   background: rgba(0, 0, 0, 0.22);
 }
+/* PLAYER-FEEDBACK ROUND — a selected unit that has already moved strikes the
+   Move label through. The button is also disabled (grey), but the strike is
+   the part that says "used up this turn" rather than "this unit cannot move
+   at all", which is what plain grey kept implying. */
+.ss-act.used span {
+  text-decoration: line-through;
+  text-decoration-thickness: 1.5px;
+  text-decoration-color: rgba(232, 163, 61, 0.75);
+}
+
+/* PLAYER-FEEDBACK ROUND — order tooltips ("I do not know what Loiter means").
+   One plain-language line per order, carried in data-tip and drawn as a bubble
+   above the strip. Deliberately shown on DISABLED buttons too: the moment the
+   player most needs to learn what FPV or Loiter is, is precisely when the
+   selected unit cannot do it. Delayed 0.25 s so it never flickers during
+   normal clicking; also appears on keyboard focus. */
+#ss-actionbar .ss-act { position: relative; }
+#ss-actionbar .ss-act::after {
+  content: attr(data-tip);
+  position: absolute;
+  left: 50%;
+  bottom: calc(100% + 12px);
+  transform: translateX(-50%) translateY(3px);
+  width: max-content;
+  max-width: 280px;
+  padding: 7px 10px;
+  font-family: var(--font-mono);
+  font-weight: 400;
+  font-size: 11px;
+  line-height: 1.45;
+  letter-spacing: 0.01em;
+  text-transform: none;
+  white-space: normal;
+  text-align: left;
+  color: var(--text);
+  background: rgba(10, 14, 11, 0.95);
+  border: 1px solid var(--panel-border);
+  border-left: 2px solid var(--accent);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.12s, visibility 0.12s, transform 0.12s;
+  z-index: 30;
+}
+#ss-actionbar .ss-act:hover::after,
+#ss-actionbar .ss-act:focus-visible::after {
+  opacity: 1;
+  visibility: visible;
+  transform: translateX(-50%) translateY(0);
+  transition-delay: 0.25s;
+}
+@media (prefers-reduced-motion: reduce) {
+  #ss-actionbar .ss-act::after { transition: none; }
+}
+
 .ab-sep {
   width: 1px;
   background: var(--panel-border);

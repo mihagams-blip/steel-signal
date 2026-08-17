@@ -2247,6 +2247,75 @@ export function populateFeatures(scene, terrain, scenario, rngFn) {
     }
     return out;
   }
+
+  // What the world reports as ground level ON a bridge deck.
+  //
+  // The height field under a bridge is the carved river channel — up to 6 units
+  // below the water plane. Everything that asks "how high is the ground here"
+  // was getting the riverbed: units placed on a deck hex sank out of sight,
+  // raycastHex's ray-march resolved a click on the visible deck to a hex down in
+  // the channel (so orders on the bridge went to the wrong tile, or nowhere),
+  // and the road appeared to dive into the water and cross the deck instead of
+  // joining it. One cause, three symptoms.
+  //
+  // This is deliberately NOT deckAdjust: that blend reaches halfLen + 12 and is
+  // meant for shaping ribbon geometry, so using it here lifted the river surface
+  // and the road approaches with it. This one is the deck's actual footprint —
+  // the same span and width the mesh is built from below (±halfLen along the
+  // axis, W/2 across, top face at d.y) — with a 2.5 u taper so a unit walking on
+  // does not pop. It only ever RAISES: where the bank is already higher than the
+  // deck, the bank wins.
+  // A bridge's hex list is not always a straight line — scenario01's road bridge
+  // is three mutually-adjacent hexes, so one of them sits beside the span rather
+  // than on it. The footprint test alone left that hex on the riverbed, which is
+  // exactly the "unit on the bridge is invisible and cannot move" case. So each
+  // deck ALSO claims the hexes the game says belong to it, as discs at the tile
+  // centres. Gameplay asks about hexes; the answer has to cover every hex it can
+  // legally stand on.
+  const deckDiscs = [];
+  for (const d of decks) {
+    const hexes = (d.def && d.def.hexes) || [];
+    for (const h of hexes) {
+      const p = wpos(h);
+      deckDiscs.push({ x: p.x, z: p.z, y: d.y });
+    }
+  }
+
+  const deckSurfaceAt = (x, z, y) => {
+    let out = y;
+    for (const d of decks) {
+      const dx = x - d.x, dz = z - d.z;
+      const along = Math.abs(dx * d.axis.x + dz * d.axis.z);
+      const across = Math.abs(dx * -d.axis.z + dz * d.axis.x);
+      const halfW = ((d.def && d.def.kind === 'rail_bridge') ? 7.2 : 8.4) * 0.5;
+      const TAPER = 2.5;
+      if (along > d.halfLen + TAPER || across > halfW + TAPER) continue;
+      const k = Math.min(1 - smooth01((along - d.halfLen) / TAPER),
+                         1 - smooth01((across - halfW) / TAPER));
+      if (k <= 0) continue;
+      out = Math.max(out, out * (1 - k) + d.y * k);
+    }
+    // HEX.size is 6 across flats; 4.4 keeps the disc inside its own tile so a
+    // neighbouring water hex is never lifted with it.
+    for (const c of deckDiscs) {
+      const dd = Math.hypot(x - c.x, z - c.z);
+      if (dd > 4.4) continue;
+      const k = 1 - smooth01((dd - 2.6) / 1.8);
+      if (k <= 0) continue;
+      out = Math.max(out, out * (1 - k) + c.y * k);
+    }
+    return out;
+  };
+
+  // Installed HERE, after `decks` is populated, because the deck heights above
+  // are themselves solved from heightAt — hooking earlier would feed the result
+  // back into its own inputs. Ground GEOMETRY is untouched: it was built from
+  // the raw height array before this module ran, so the channel stays carved and
+  // the deck still spans it. Only what the game QUERIES now agrees with what is
+  // drawn.
+  if (terrain && typeof terrain.setDeckHook === 'function' && decks.length) {
+    terrain.setDeckHook(deckSurfaceAt);
+  }
   const deckFor = (hex) => decks.find((d) =>
     d.def.anchor.q === hex.q && d.def.anchor.r === hex.r) || decks[0] || null;
 
@@ -2871,6 +2940,9 @@ export function populateFeatures(scene, terrain, scenario, rngFn) {
   const matShoulder = surfaceMaterial(Tex.dirtRoad, { color: 0x9C8B71, roughness: 0.96 });
   const matAsphalt = surfaceMaterial(texRoadPaved, { roughness: 0.9 });
   const matDirtRoad = surfaceMaterial(texRoadDirt, { roughness: 0.95 });
+  // FEEDBACK R2 item 1 — kind 'track' is a worn farm lane (terrain.js layout):
+  // drawn with the PHASE-2 farm-lane recipe, never as a graded ribbon.
+  const matTrackLane = surfaceMaterial(texFarmTrack, { roughness: 0.97 });
 
   const pavedKeys = new Set();
   if (L && L.roads) {
@@ -2878,6 +2950,21 @@ export function populateFeatures(scene, terrain, scenario, rngFn) {
       if (rd.kind !== 'paved') continue;
       for (const h of rd.hexes) pavedKeys.add(`${h.q},${h.r}`);
     }
+    // FEEDBACK ROUND 2, item 1 — "roads end in the middle of nowhere". When a
+    // dirt run is cut where its chain rides the paved road, the ribbon used to
+    // stop at the last unpaved hex CENTRE — a full hex pitch (10.4 u) short of
+    // the asphalt, visibly dying in grass one hex from the highway (measured:
+    // 2 of 6 rendered dirt runs on the shipped map). Each cut end now extends
+    // toward the paved centreline and stops 0.55 pitches out (≈ 5.7 u): past
+    // the asphalt's widest wobble (4.7·1.15 ≈ 5.4 u), so dirt is never painted
+    // over asphalt, yet inside the paved shoulder's narrowest reach (7.6·0.85
+    // ≈ 6.5 u), so the dirt visibly T-joins the highway through its gravel
+    // verge — the way a real spur meets a graded road.
+    const JOIN_T = 0.55;
+    const joinPt = (fromH, pavedH) => {
+      const p = wpos(pavedH), f = wpos(fromH);
+      return { x: p.x + (f.x - p.x) * JOIN_T, z: p.z + (f.z - p.z) * JOIN_T };
+    };
     for (const rd of L.roads) {
       if (rd.kind === 'paved') {
         const pts = smoothChain(rd.hexes.map(wpos));
@@ -2888,25 +2975,46 @@ export function populateFeatures(scene, terrain, scenario, rngFn) {
           halfFn: wobbleWidth(4.7), lift: 0.13, step: 2.4, vScale: 1 / 13, renderOrder: 2,
         });
       } else {
-        // dirt tracks yield to asphalt where the two share hexes
+        // dirt roads and farm lanes yield to asphalt where the chains share
+        // hexes; every cut end reaches back to the asphalt's verge (JOIN_T)
+        const lane = rd.kind === 'track';
         let run = [];
-        const flush = () => {
+        let prevPaved = null;          // paved hex that cut the previous run
+        const flush = (nextPaved) => {
           if (run.length > 1) {
-            const pts = smoothChain(run.map(wpos));
-            addRibbon(pts, matShoulder, {
-              halfFn: wobbleWidth(4.8, 1.4), lift: 0.05, step: 2.4, vScale: 1 / 10, renderOrder: 1,
-            });
-            addRibbon(pts, matDirtRoad, {
-              halfFn: wobbleWidth(3.5, 1.4), lift: 0.10, step: 2.4, vScale: 1 / 9, renderOrder: 2,
-            });
+            const raw = run.map(wpos);
+            if (prevPaved) raw.unshift(joinPt(run[0], prevPaved));
+            if (nextPaved) raw.push(joinPt(run[run.length - 1], nextPaved));
+            const pts = smoothChain(raw);
+            // renderOrder 1.6 (was 2, tied with the asphalt): where a join tip
+            // slides under asphalt that smoothChain has pulled off the hex
+            // centre, the tie used to leave the winner to the transparent
+            // z-sort — camera-dependent. 1.6 keeps the surface above both
+            // shoulders (1) and DETERMINISTICALLY below asphalt (2): the dirt
+            // dives under the highway, never paints over it.
+            if (lane) {
+              // two bare wheel ruts with a grassed crown — the same section
+              // the PHASE-2 machinery lanes use; a lane may end in a field
+              addRibbon(pts, matTrackLane, {
+                halfFn: wobbleWidth(2.15, 2.4), lift: 0.075, step: 3.2,
+                vScale: 1 / 6, cols: TRACK_COLS, renderOrder: 1.6,
+              });
+            } else {
+              addRibbon(pts, matShoulder, {
+                halfFn: wobbleWidth(4.8, 1.4), lift: 0.05, step: 2.4, vScale: 1 / 10, renderOrder: 1,
+              });
+              addRibbon(pts, matDirtRoad, {
+                halfFn: wobbleWidth(3.5, 1.4), lift: 0.10, step: 2.4, vScale: 1 / 9, renderOrder: 1.6,
+              });
+            }
           }
           run = [];
         };
         for (const h of rd.hexes) {
-          if (pavedKeys.has(`${h.q},${h.r}`)) { flush(); continue; }
+          if (pavedKeys.has(`${h.q},${h.r}`)) { flush(h); prevPaved = h; continue; }
           run.push(h);
         }
-        flush();
+        flush(null);
       }
     }
   }
